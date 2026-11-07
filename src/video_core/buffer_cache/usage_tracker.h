@@ -32,6 +32,10 @@ public:
     }
 
     void Reset() noexcept {
+        if (!tracked) {
+            return;
+        }
+        tracked = false;
         std::ranges::fill(pages, 0ULL);
         recent.fill({~u64{0}, 0});
         full_begin = 0;
@@ -47,6 +51,7 @@ public:
                 return;
             }
         }
+        tracked = true;
         recent[recent_cursor++ % recent.size()] = {offset, size};
         const size_t page = offset >> BUFFER_PAGE_SHIFT;
         const size_t page_end = (offset + size) >> BUFFER_PAGE_SHIFT;
@@ -149,6 +154,7 @@ private:
     /// Pages known to be all ones (FillPages).
     size_t full_begin{};
     size_t full_end{};
+    bool tracked{};
 };
 
 } // namespace VideoCommon
