@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <limits>
 #include <map>
+#include <tuple>
 #include <vector>
 #include <optional>
 #include <bit>
@@ -1081,6 +1082,11 @@ template <class P>
 bool TextureCache<P>::BlitImage(const Tegra::Engines::Fermi2D::Surface& dst,
                                 const Tegra::Engines::Fermi2D::Surface& src,
                                 const Tegra::Engines::Fermi2D::Config& copy) {
+    if constexpr (FRAMEBUFFER_BLITS) {
+        if (g_blit_source_format) {
+            return false; // A sample-only source format need not support a framebuffer.
+        }
+    }
     const auto result = GetBlitImages(dst, src, copy);
     if (!result) {
         return false;
@@ -1088,6 +1094,13 @@ bool TextureCache<P>::BlitImage(const Tegra::Engines::Fermi2D::Surface& dst,
     const BlitImages images = *result;
     const ImageId dst_id = images.dst_id;
     const ImageId src_id = images.src_id;
+
+    if (g_blit_source_format &&
+        (slot_images[src_id].info.num_samples != 1 || slot_images[dst_id].info.num_samples != 1 ||
+         !slot_images[src_id].TryFindBase(src.Address()) ||
+         !slot_images[dst_id].TryFindBase(dst.Address()))) {
+        return false;
+    }
 
     PrepareImage(src_id, false, false);
     PrepareImage(dst_id, true, false);
@@ -1142,7 +1155,13 @@ bool TextureCache<P>::BlitImage(const Tegra::Engines::Fermi2D::Surface& dst,
     const std::optional src_base = src_image.TryFindBase(src.Address());
     const SubresourceRange src_range{.base = src_base.value(), .extent = {1, 1}};
     const ImageViewInfo src_view_info(ImageViewType::e2D, images.src_format, src_range);
-    const auto [src_framebuffer_id, src_view_id] = RenderTargetFromImage(src_id, src_view_info);
+    [[maybe_unused]] FramebufferId src_framebuffer_id{};
+    ImageViewId src_view_id{};
+    if (g_blit_source_format) {
+        src_view_id = FindOrEmplaceImageView(src_id, src_view_info);
+    } else {
+        std::tie(src_framebuffer_id, src_view_id) = RenderTargetFromImage(src_id, src_view_info);
+    }
     const auto [src_samples_x, src_samples_y] = SamplesLog2(src_image.info.num_samples);
     Region2D src_region{
         Offset2D{.x = copy.src_x0 >> src_samples_x, .y = copy.src_y0 >> src_samples_y},
@@ -2863,6 +2882,9 @@ std::optional<typename TextureCache<P>::BlitImages> TextureCache<P>::GetBlitImag
     const GPUVAddr src_addr = src.Address();
     ImageInfo dst_info(dst);
     ImageInfo src_info(src);
+    if (g_blit_source_format) {
+        src_info.format = *g_blit_source_format;
+    }
     const bool can_be_depth_blit =
         dst_info.format == src_info.format && copy.filter == Tegra::Engines::Fermi2D::Filter::Point;
     ImageId dst_id;

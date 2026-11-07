@@ -256,6 +256,8 @@ public:
     /// Ocarina of Time's movie network (ocarina_movie.h): true when this dispatch is skipped or
     /// replaced.
     bool ProcessOcarinaMovie(u64 program_id, u64 native_key);
+    /// Opt-in spatial stand-in for the captured gameplay output pass, not the movie network.
+    bool ProcessOcarinaUpscale(u64 program_id, u64 unique_hash);
     void TraceDlssContract(u64 native_key, bool warn_unvalidated = true);
 
     /// GPU thread split with macros on its front half (gpu_split.h, EDEN_NX2_SPLIT=2), called by
