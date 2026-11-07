@@ -34,7 +34,7 @@ struct NupSpillFile {
 
 /// LRU over decompressed zstd extents, shared by the files of one container.
 struct NupDecompressCache {
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(__aarch64__)
     // A phone has no RAM to spare: Ocarina of Time is killed for memory on a 12 GB one.
     // Members over half of this are decompressed to a file instead.
     static constexpr std::size_t DefaultCap = 128 * 1024 * 1024;
