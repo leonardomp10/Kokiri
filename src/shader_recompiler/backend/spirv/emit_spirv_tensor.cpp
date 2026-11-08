@@ -278,13 +278,16 @@ void DefineSoftwareMatrixFunctions(EmitContext& ctx, const IR::Program& program)
     const bool shared_b = (needed[0] || needed[1]) && shared_option &&
                           std::string_view{shared_option} == "1" &&
                           program.stage == Stage::Compute &&
-                          ctx.profile.required_compute_subgroup_size == 32 &&
+                          (ctx.profile.required_compute_subgroup_size == 32 ||
+                           ctx.profile.required_compute_subgroup_size == 64) &&
                           ctx.profile.support_subgroup_broadcast &&
                           ctx.profile.prefer_software_matrix_broadcast &&
                           ctx.profile.support_explicit_workgroup_layout &&
                           ctx.profile.supported_spirv >= 0x00010600 &&
                           (!program.shared_memory_size || ctx.uses_explicit_workgroup_layout) &&
-                          program.workgroup_size[0] % 32 == 0 && threads && threads <= 1024 &&
+                          ctx.profile.required_compute_subgroup_size != 0 &&
+                          program.workgroup_size[0] % ctx.profile.required_compute_subgroup_size == 0 &&
+                          threads && threads <= 1024 &&
                           staging_offset + threads * sizeof(u32) <= 16384 &&
                           HasUniformMatrixCalls(program);
     Id staging{}, staging_element{}, subgroup_id{};
@@ -379,7 +382,9 @@ void DefineSoftwareMatrixFunctions(EmitContext& ctx, const IR::Program& program)
         const Id row_base = add(warp_base, and_(lane, 28));
         const Id col_base = add(warp_base, ctx.OpShiftLeftLogical(u32ty, and_(lane, 3), imm(3)));
         const Id shared_base = shared_b
-            ? ctx.OpIMul(u32ty, ctx.OpLoad(u32ty, subgroup_id), imm(32)) : Id{};
+            ? ctx.OpIMul(u32ty, ctx.OpLoad(u32ty, subgroup_id),
+                         imm(ctx.profile.required_compute_subgroup_size))
+            : Id{};
         // A comes from lane `component` of this lane's own quad: a quad broadcast with a constant
         // index, which hosts do without a general (LDS) shuffle.
         const bool quad = ctx.profile.support_quad_shuffles;
