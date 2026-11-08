@@ -172,6 +172,9 @@ void TextureCache<P>::RunGarbageCollector() {
             runtime.Finish();
             SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, map.mapped_span, swizzle_data_buffer);
             ++gc_download_deletes;
+            ClearStaleImage(image);
+        } else {
+            MarkStale(image); // before UntrackImage (see MarkStale)
         }
         if (True(image.flags & ImageFlagBits::Tracked)) {
             UntrackImage(image, image_id);
@@ -253,6 +256,53 @@ void TextureCache<P>::RunGarbageCollector() {
     if (total_used_memory >= critical_memory) {
         Configure(true);
         Collect();
+    }
+}
+
+template <class P>
+void TextureCache<P>::MarkStale(const ImageBase& image) {
+    if (!Tegra::g_nx2_ampere.load(std::memory_order_relaxed) ||
+        False(image.flags & ImageFlagBits::GpuModified) ||
+        True(image.flags & (ImageFlagBits::CpuModified | ImageFlagBits::Sparse |
+                            ImageFlagBits::Unbacked))) {
+        return;
+    }
+    // Tracked from here on so CPU writes reach WriteMemory. Marking before the image's own
+    // tracking goes keeps the pages' write protection from switching off and on again.
+    stale_pages.Mark(image.cpu_addr, image.guest_size_bytes, [this](DAddr addr, u64 size) {
+        device_memory.UpdatePagesCachedCount(addr, size, 1);
+    });
+}
+
+template <class P>
+void TextureCache<P>::ClearStale(DAddr addr, size_t size) {
+    stale_pages.Clear(addr, size, [this](DAddr run_addr, u64 run_size) {
+        device_memory.UpdatePagesCachedCount(run_addr, run_size, -1);
+    });
+}
+
+template <class P>
+void TextureCache<P>::ClearStaleImage(const ImageBase& image) {
+    if (stale_pages.Count() == 0) {
+        return;
+    }
+    if (False(image.flags & ImageFlagBits::Sparse)) {
+        ClearStale(image.cpu_addr, image.guest_size_bytes);
+        return;
+    }
+    ClearStaleGpu(image.gpu_addr, image.guest_size_bytes);
+}
+
+template <class P>
+void TextureCache<P>::ClearStaleGpu(GPUVAddr gpu_addr, size_t size) {
+    if (stale_pages.Count() == 0) {
+        return;
+    }
+    // Each piece is contiguous in device memory (GetSubmappedRange splits where it is not).
+    for (const auto& [piece_addr, piece_size] : gpu_memory->GetSubmappedRange(gpu_addr, size)) {
+        if (const auto device_addr = gpu_memory->GpuToCpuAddress(piece_addr)) {
+            ClearStale(*device_addr, piece_size);
+        }
     }
 }
 
@@ -433,6 +483,12 @@ void TextureCache<P>::TickFrame() {
                  async_decodes_queued, astc_opaque_images, astc_alpha_images);
         LOG_INFO(HW_GPU, "Texture cache last 600 frames: {} uploads from guest memory, {} MiB (largest {} MiB, {} by layer)",
                  images_uploaded, uploaded_bytes >> 20, largest_upload >> 20, layer_uploads);
+        LOG_INFO(HW_GPU,
+                 "Texture cache last 600 frames: stale uploads skipped {} ({} MiB), {} uploaded "
+                 "for buffer-written pages; {} MiB of pages marked stale",
+                 tc_stale_skips, tc_stale_skip_bytes >> 20, tc_stale_gpu_written,
+                 (stale_pages.Count() << StalePages::PAGE_BITS) >> 20);
+        tc_stale_skips = tc_stale_skip_bytes = tc_stale_gpu_written = 0;
         images_uploaded = uploaded_bytes = largest_upload = layer_uploads = 0;
         astc_opaque_images = astc_alpha_images = 0;
         std::vector<std::pair<u32, u64>> shapes;
@@ -922,6 +978,7 @@ FramebufferId TextureCache<P>::GetFramebufferId(const RenderTargets& key) {
 
 template <class P>
 void TextureCache<P>::WriteMemory(DAddr cpu_addr, size_t size) {
+    ClearStale(cpu_addr, size);
     ForEachImageInRegion(cpu_addr, size, [this, cpu_addr, size](ImageId image_id, Image& image) {
         if (True(image.flags & ImageFlagBits::UnwrittenSparse)) {
             // Written at last: a backed image replaces it where it is used next.
@@ -999,6 +1056,7 @@ void TextureCache<P>::DownloadMemory(DAddr cpu_addr, size_t size) {
             Image& image = slot_images[entry.image_id];
             SwizzleImage(*gpu_memory, image.gpu_addr, image.info, entry.copies,
                          entry.map.mapped_span, swizzle_data_buffer);
+            ClearStaleImage(image);
         }
         pending.clear();
         pending_bytes = 0;
@@ -1055,6 +1113,7 @@ void TextureCache<P>::UnmapMemory(DAddr cpu_addr, size_t size) {
         UnregisterImage(id);
         DeleteImage(id);
     }
+    ClearStale(cpu_addr, size);
 }
 
 template <class P>
@@ -1549,12 +1608,14 @@ void TextureCache<P>::PopAsyncFlushes() {
                 std::span<u8> download_span =
                     download_buffer.mapped_span.subspan(download_buffer.offset);
                 SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, download_span, swizzle_data_buffer);
+                ClearStaleImage(image);
             } else {
                 const BufferDownload& buffer_info = slot_buffer_downloads[download_info.object_id];
                 std::span<u8> download_span =
                     download_buffer.mapped_span.subspan(download_buffer.offset);
                 gpu_memory->WriteBlockUnsafe(buffer_info.address, download_span.data(),
                                              buffer_info.size);
+                ClearStaleGpu(buffer_info.address, buffer_info.size);
                 slot_buffer_downloads.erase(download_info.object_id);
             }
         }
@@ -1597,6 +1658,7 @@ void TextureCache<P>::PopAsyncFlushes() {
             const ImageBase& image = download_info.GetImage(slot_images);
             const auto copies = FullDownloadCopies(image.info);
             SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, download_span, swizzle_data_buffer);
+            ClearStaleImage(image);
             download_map.offset += image.unswizzled_size_bytes;
             download_span = download_span.subspan(image.unswizzled_size_bytes);
         }
@@ -1742,6 +1804,21 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
     // Images uploaded by layer stay tracked while some of their layers are dirty.
     if (False(image.flags & ImageFlagBits::Tracked)) {
         TrackImage(image, image_id);
+    }
+
+    // Made where a dropped GPU-written image left stale bytes (MarkStale): nothing to upload.
+    // Pages the buffer cache wrote on the GPU may hold data written back since: upload those.
+    if (Tegra::g_nx2_ampere.load(std::memory_order_relaxed) && image.dirty_layers.empty() &&
+        False(image.flags & (ImageFlagBits::Sparse | ImageFlagBits::SparseLayers |
+                             ImageFlagBits::SparseTiles | ImageFlagBits::Unbacked)) &&
+        stale_pages.IsAll(image.cpu_addr, image.guest_size_bytes)) {
+        if (!Tegra::Nx2MayBeGpuWritten(image.cpu_addr, image.guest_size_bytes)) {
+            ++tc_stale_skips;
+            tc_stale_skip_bytes += image.guest_size_bytes;
+            runtime.TransitionImageLayout(image);
+            return;
+        }
+        ++tc_stale_gpu_written;
     }
 
     if (True(image.flags & ImageFlagBits::SparseLayers)) {
