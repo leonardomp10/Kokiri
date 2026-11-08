@@ -4,6 +4,9 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <tuple>
+#include <mutex>
+#include <map>
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
@@ -656,6 +659,44 @@ bool DmaPusher::ReadGpuWrittenCommands(GPUVAddr address, u32 count) {
         split.WaitForWriters();
     }
     bool past_sync = !split.Active();
+    // EDEN_NX2_LIST_WAIT_STATS=1 (diagnostics): time spent reading GPU-written lists, by the
+    // method the list's words continue (engine type, subchannel and method), logged every 10 s.
+    static const bool list_wait_stats = std::getenv("EDEN_NX2_LIST_WAIT_STATS") != nullptr;
+    const auto list_start = list_wait_stats ? std::chrono::steady_clock::now()
+                                            : std::chrono::steady_clock::time_point{};
+    SCOPE_EXIT {
+        if (!list_wait_stats) {
+            return;
+        }
+        static std::mutex stats_mutex;
+        static std::map<std::tuple<u32, u32, u32, bool>, std::pair<u64, u64>> stats;
+        static auto window = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        const u32 sub = dma_state.subchannel < max_subchannels ? dma_state.subchannel : 0;
+        const auto key = std::make_tuple(static_cast<u32>(subchannel_type[sub]), sub,
+                                         dma_state.method, dma_state.method_count == 0);
+        std::scoped_lock lock{stats_mutex};
+        auto& entry = stats[key];
+        ++entry.first;
+        entry.second += static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::microseconds>(now - list_start).count());
+        if (now - window >= std::chrono::seconds{10}) {
+            std::vector<std::pair<u64, std::string>> rows;
+            for (const auto& [k, v] : stats) {
+                rows.emplace_back(v.second,
+                                  fmt::format("engine {} sub {} method {:#x}{}: {} reads, {:.1f} ms",
+                                              std::get<0>(k), std::get<1>(k), std::get<2>(k),
+                                              std::get<3>(k) ? " (command entry)" : "",
+                                              v.first, static_cast<double>(v.second) / 1000.0));
+            }
+            std::sort(rows.rbegin(), rows.rend());
+            for (size_t i = 0; i < rows.size() && i < 8; ++i) {
+                LOG_INFO(HW_GPU, "List wait stats (10 s): {}", rows[i].second);
+            }
+            stats.clear();
+            window = now;
+        }
+    };
     using GpuWrittenList = VideoCore::RasterizerInterface::GpuWrittenList;
     command_headers.resize_destructive(count);
     u8* const out = reinterpret_cast<u8*>(command_headers.data());
