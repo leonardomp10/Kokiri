@@ -13,6 +13,8 @@
 #include <unordered_set>
 #include <fmt/ranges.h>
 #include <array>
+#include <mutex>
+#include <set>
 #include <vector>
 #include <boost/container/small_vector.hpp>
 
@@ -288,6 +290,20 @@ const ShaderInfo* ShaderCache::ComputeShader() {
         DlssContract::IsFastFusionCandidate(program_id,
                                             shader->lowered_native->native_program_key)) {
         kepler_compute->TraceDlssContract(shader->lowered_native->native_program_key);
+    }
+    // EDEN_NX2_OOT_KEYS=1 (diagnostics): log each native compute program's key once, with its
+    // shader hash, to find Ocarina of Time's network passes at other resolutions.
+    if (static const bool log_keys = std::getenv("EDEN_NX2_OOT_KEYS") != nullptr;
+        log_keys && kepler_compute->IsNativeMode() && shader->lowered_native) {
+        static std::mutex keys_mutex;
+        static std::set<std::pair<u64, u64>> keys_seen;
+        const std::pair<u64, u64> entry{shader->unique_hash,
+                                        shader->lowered_native->native_program_key};
+        std::scoped_lock keys_lock{keys_mutex};
+        if (keys_seen.size() < 256 && keys_seen.insert(entry).second) {
+            LOG_INFO(HW_GPU, "OoT keys: compute shader {:016x} native key {:#018x}", entry.first,
+                     entry.second);
+        }
     }
     if (kepler_compute->IsNativeMode() && shader->lowered_native &&
         kepler_compute->BypassOotNetwork(program_id, shader->lowered_native->native_program_key)) {
