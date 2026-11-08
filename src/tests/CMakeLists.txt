@@ -24,6 +24,7 @@ add_executable(tests
     video_core/ampere_yoshi_title.cpp
     video_core/ampere_yoshi_compute.cpp
     video_core/texture_rect_descriptor.cpp
+    video_core/join_whole_copy.cpp
     audio_core/batch_decoder.cpp
     audio_core/hardware_audio_codec.cpp
     core/gpu_dirty_memory.cpp
