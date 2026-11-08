@@ -198,6 +198,10 @@ bool DmaPusher::Step() {
         // (the split only starts with unsafe reads; the settings can change mid-game).
         const bool use_safe = !VideoCommon::GpuSplit::Get().Active() &&
                               (Settings::IsDMALevelDefault() ? Settings::IsGPULevelHigh() : Settings::IsDMALevelSafe());
+        static const bool accurate_list_copy = [] {
+            const char* value = std::getenv("EDEN_NX2_ACCURATE_LIST_COPY");
+            return value && value[0] == '1' && value[1] == '\0';
+        }();
         if (!gpu_written && VideoCommon::GpuSplit::Get().Active() &&
             VideoCommon::GpuSplit::Get().WaitForWriters()) {
             gpu_written =
@@ -223,17 +227,18 @@ bool DmaPusher::Step() {
             RecordParsedEntry(header, commands);
             Nx2CmdPageDiag::CountEntry(Nx2CmdPageDiag::Path::Submitted);
             command_resume_offset += ProcessCommands(commands, 0);
+        } else if ((!use_safe || (accurate_list_copy && gpu_written)) &&
+                   ReadGpuWrittenCommands(dma_state.dma_get, static_cast<u32>(header.size))) {
+            const std::span<const CommandHeader> commands{command_headers.data(), header.size};
+            RecordParsedEntry(header, commands);
+            Nx2CmdPageDiag::CountEntry(Nx2CmdPageDiag::Path::Copy);
+            command_resume_offset +=
+                ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
         } else if (use_safe) {
             Tegra::Memory::GpuGuestMemory<Tegra::CommandHeader, Tegra::Memory::GuestMemoryFlags::SafeRead>headers(memory_manager, dma_state.dma_get, header.size, &command_headers);
             const std::span<const CommandHeader> commands{headers.data(), headers.size()};
             RecordParsedEntry(header, commands);
             Nx2CmdPageDiag::CountEntry(Nx2CmdPageDiag::Path::Safe);
-            command_resume_offset +=
-                ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
-        } else if (ReadGpuWrittenCommands(dma_state.dma_get, static_cast<u32>(header.size))) {
-            const std::span<const CommandHeader> commands{command_headers.data(), header.size};
-            RecordParsedEntry(header, commands);
-            Nx2CmdPageDiag::CountEntry(Nx2CmdPageDiag::Path::Copy);
             command_resume_offset +=
                 ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
         } else {
