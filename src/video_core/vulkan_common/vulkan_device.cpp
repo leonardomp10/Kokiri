@@ -1561,10 +1561,20 @@ void Device::RemoveUnsuitableExtensions() {
                                        VK_EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_EXTENSION_NAME);
 
     // VK_EXT_subgroup_size_control
-    extensions.subgroup_size_control =
-        features.subgroup_size_control.subgroupSizeControl &&
-        properties.subgroup_size_control.minSubgroupSize <= GuestWarpSize &&
-        properties.subgroup_size_control.maxSubgroupSize >= GuestWarpSize;
+    // Adreno a7xx (Turnip) runs 64 or 128 lanes, never 32. Keep the extension there so compute
+    // pipelines with warp ops can ask for the smallest wave (64): two guest warps per subgroup
+    // instead of four, and the software matrix broadcast path stays usable.
+    {
+        const u32 min_size = properties.subgroup_size_control.minSubgroupSize;
+        const u32 max_size = properties.subgroup_size_control.maxSubgroupSize;
+        const bool fits_guest = min_size <= GuestWarpSize && max_size >= GuestWarpSize;
+        const bool turnip_wave64 = properties.driver.driverID == VK_DRIVER_ID_MESA_TURNIP &&
+                                   min_size == 2 * GuestWarpSize && max_size >= min_size &&
+                                   std::getenv("EDEN_NX2_NO_WAVE64") == nullptr;
+        extensions.subgroup_size_control =
+            features.subgroup_size_control.subgroupSizeControl && (fits_guest || turnip_wave64);
+        compute_warp_request_size = fits_guest ? GuestWarpSize : min_size;
+    }
     RemoveExtensionFeatureIfUnsuitable(extensions.subgroup_size_control,
                                        features.subgroup_size_control,
                                        VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);

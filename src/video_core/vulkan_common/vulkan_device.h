@@ -529,6 +529,19 @@ FN_MAX_LIMIT_LIST
         return properties.subgroup_size_control.requiredSubgroupSizeStages & stage;
     }
 
+    /// Subgroup size compute pipelines with warp ops request: the guest warp (32), or the
+    /// smallest host wave where 32 is not available (64 on Adreno a7xx).
+    u32 GetComputeWarpRequestSize() const {
+        return compute_warp_request_size;
+    }
+
+    /// True if a pipeline may require this subgroup size.
+    bool IsSubgroupSizeRequestable(u32 size) const {
+        return extensions.subgroup_size_control &&
+               properties.subgroup_size_control.minSubgroupSize <= size &&
+               properties.subgroup_size_control.maxSubgroupSize >= size;
+    }
+
     /// Returns true if the device supports the provided subgroup feature.
     bool IsSubgroupFeatureSupported(VkSubgroupFeatureFlagBits feature) const {
         return properties.subgroup_properties.supportedOperations & feature;
@@ -1331,6 +1344,7 @@ private:
     bool is_blit_depth24_stencil8_supported{}; ///< Support for blitting from and to D24S8.
     bool is_blit_depth32_stencil8_supported{}; ///< Support for blitting from and to D32S8.
     bool is_warp_potentially_bigger{};         ///< Host warp size can be bigger than guest.
+    u32 compute_warp_request_size{32};         ///< Required subgroup size for warp-op compute.
     bool is_integrated{};                      ///< Is GPU an iGPU.
     bool is_virtual{};                         ///< Is GPU a virtual GPU.
     bool is_non_gpu{};                         ///< Is SoftwareRasterizer, FPGA, non-GPU device.
