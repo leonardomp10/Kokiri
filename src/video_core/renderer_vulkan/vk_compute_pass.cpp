@@ -304,7 +304,8 @@ ComputePass::ComputePass(const Device& device_, Scheduler& scheduler, Descriptor
         .pNext = nullptr,
         .requiredSubgroupSize = optional_subgroup_size ? *optional_subgroup_size : 32U,
     };
-    bool use_setup_size = device.IsExtSubgroupSizeControlSupported() && optional_subgroup_size;
+    bool use_setup_size = optional_subgroup_size &&
+                          device.IsSubgroupSizeRequestable(*optional_subgroup_size);
     pipeline = device.GetLogical().CreateComputePipeline(VkComputePipelineCreateInfo{
         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
         .pNext = nullptr,

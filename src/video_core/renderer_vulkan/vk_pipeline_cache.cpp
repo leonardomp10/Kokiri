@@ -574,9 +574,9 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         // ComputePipeline uses this same condition to request GuestWarpSize for warp ops.
         // TensorMulAdd marks subgroup invocation/shuffle usage, so its pipelines take that path.
         .required_compute_subgroup_size =
-            device.IsExtSubgroupSizeControlSupported() &&
+            device.IsSubgroupSizeRequestable(device.GetComputeWarpRequestSize()) &&
                     device.IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT)
-                ? GuestWarpSize
+                ? device.GetComputeWarpRequestSize()
                 : 0U,
         .supported_subgroup_stages = supported_subgroup_stages,
         .support_viewport_index_layer_non_geometry =

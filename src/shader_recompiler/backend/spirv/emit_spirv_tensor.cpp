@@ -386,8 +386,11 @@ void DefineSoftwareMatrixFunctions(EmitContext& ctx, const IR::Program& program)
         if (quad) {
             ctx.AddCapability(spv::Capability::GroupNonUniformQuad);
         }
+        // Wave64 hosts (Adreno a7xx, which cannot run 32 lanes) hold two guest warps per
+        // subgroup: broadcast each warp's four sources and pick by the lane's warp.
+        const u32 host_warps = ctx.profile.required_compute_subgroup_size / 32;
         const bool broadcast_b = program.stage == Stage::Compute &&
-                                 ctx.profile.required_compute_subgroup_size == 32 &&
+                                 (host_warps == 1 || host_warps == 2) &&
                                  ctx.profile.support_subgroup_broadcast &&
                                  ctx.profile.prefer_software_matrix_broadcast;
         if (broadcast_b) {
@@ -404,17 +407,26 @@ void DefineSoftwareMatrixFunctions(EmitContext& ctx, const IR::Program& program)
             }
             // Turnip waterfalls divergent relative shuffle offsets over all 32 lanes.
             // These gathers have only four absolute sources; keep every broadcast unconditional.
-            std::array<Id, 4> sources;
-            for (u32 i = 0; i < sources.size(); ++i) {
-                sources[i] = ctx.OpGroupNonUniformBroadcast(u32ty, imm(3), value,
-                                                           imm(offset + i * 8));
-            }
             const Id column = and_(lane, 3);
-            const Id low = ctx.OpSelect(u32ty, ctx.OpIEqual(ctx.U1, column, imm(0)),
-                                       sources[0], sources[1]);
-            const Id high = ctx.OpSelect(u32ty, ctx.OpIEqual(ctx.U1, column, imm(2)),
-                                        sources[2], sources[3]);
-            return ctx.OpSelect(u32ty, ctx.OpULessThan(ctx.U1, column, imm(2)), low, high);
+            std::array<Id, 2> per_warp{};
+            for (u32 warp = 0; warp < host_warps; ++warp) {
+                std::array<Id, 4> sources;
+                for (u32 i = 0; i < sources.size(); ++i) {
+                    sources[i] = ctx.OpGroupNonUniformBroadcast(u32ty, imm(3), value,
+                                                               imm(warp * 32 + offset + i * 8));
+                }
+                const Id low = ctx.OpSelect(u32ty, ctx.OpIEqual(ctx.U1, column, imm(0)),
+                                           sources[0], sources[1]);
+                const Id high = ctx.OpSelect(u32ty, ctx.OpIEqual(ctx.U1, column, imm(2)),
+                                            sources[2], sources[3]);
+                per_warp[warp] =
+                    ctx.OpSelect(u32ty, ctx.OpULessThan(ctx.U1, column, imm(2)), low, high);
+            }
+            if (host_warps == 1) {
+                return per_warp[0];
+            }
+            return ctx.OpSelect(u32ty, ctx.OpINotEqual(ctx.U1, and_(lane, 32), imm(0)),
+                                per_warp[1], per_warp[0]);
         };
         // One iteration per K=8 group (the four K pairs between roundings), unrolled so every
         // pair's lanes are constants. Unrolling all of K=16 instead lets the host compiler hoist
