@@ -580,3 +580,9 @@ if (ENABLE_NVIDIA_DLSS)
 endif()
 
 create_target_directory_groups(video_core)
+
+# GCC 13 at -O3 drops the split front's macro code uploads in maxwell_3d.cpp (every Turing macro
+# then reads empty macro RAM: "uninitialized register read"); -O2 builds it correctly.
+if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set_source_files_properties(engines/maxwell_3d.cpp PROPERTIES COMPILE_OPTIONS "-O2")
+endif()
