@@ -4242,8 +4242,9 @@ void Image::FreeOriginalIfDownscaled() {
     // Below 1x the full-size image is rarely used again once rendering went to the scaled one:
     // Ocarina of Time's 2560x1440 targets and 12288x12288 shadow map kept ~0.9 GB of a phone's
     // memory for nothing. Plain backed 2D color or depth images only; uploads and downloads scale
-    // down first, which makes it again (RecreateOriginal). Android only, where memory runs out.
-#ifdef __ANDROID__
+    // down first, which makes it again (RecreateOriginal). Android and Linux aarch64 handhelds
+    // (AYN Thor: ~11 GiB, the rest in zram), where memory runs out.
+#if defined(__ANDROID__) || defined(__aarch64__)
     if (!Settings::values.resolution_info.downscale || !original_image ||
         !scaled_image ||
         info.type != ImageType::e2D || info.num_samples != 1 ||
