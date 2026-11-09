@@ -57,6 +57,7 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
     thread = std::jthread([&](std::stop_token stop_token) {
         const Common::DkbCpuTrace::Registration cpu_trace{Common::DkbCpuTrace::Role::GpuCommand};
         Common::SetCurrentThreadName("GPU");
+        Common::PinCurrentThreadForRole(Common::KokiriThreadRole::Front);
         VideoCommon::GpuSplit::MarkGpuThread();
 #ifdef __linux__
         // The pending-channel polls below sleep 50 us; the default timer slack adds up to 50 more.
