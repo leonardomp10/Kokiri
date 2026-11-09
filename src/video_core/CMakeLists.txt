@@ -580,3 +580,10 @@ if (ENABLE_NVIDIA_DLSS)
 endif()
 
 create_target_directory_groups(video_core)
+
+# GCC 13 at -O3 (loop unswitching) drops the split front's macro code uploads in
+# Maxwell3D::FrontCallMultiMethod: every Turing macro then runs from empty macro RAM
+# ("Native MME (split front) failed: ... uninitialized register read"). Clang is not affected.
+if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set_source_files_properties(engines/maxwell_3d.cpp PROPERTIES COMPILE_OPTIONS "-fno-unswitch-loops")
+endif()
