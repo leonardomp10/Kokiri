@@ -178,8 +178,14 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
         if (Nx2SemaphoreWaiters::Get().Latched(this)) {
             return true;
         }
+        // EDEN_NX2_ACQUIRE_DRAIN_US: the valve's interval (default 1000 us).
+        static const auto drain_interval = [] {
+            const char* value = std::getenv("EDEN_NX2_ACQUIRE_DRAIN_US");
+            return std::chrono::microseconds{value != nullptr ? std::strtoll(value, nullptr, 10)
+                                                              : 1000};
+        }();
         const auto now = std::chrono::steady_clock::now();
-        if (now - pending_acquire->last_drain < std::chrono::milliseconds{1}) {
+        if (now - pending_acquire->last_drain < drain_interval) {
             return false;
         }
         pending_acquire->last_drain = now;
