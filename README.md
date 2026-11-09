@@ -40,6 +40,13 @@ On top of Lichii for Android (pavelgajdo, early November 2026 base):
 - **Fewer waits on the split GPU thread** (ports of jpkto's Lichii #805 work): command entries wait only for the writers before the last host sync; GPU-written compute list words (Ocarina's culling counts) stay on the host GPU and are dispatched indirectly; greater-or-equal semaphore acquires are decided without draining the split; GPU-written mesh draw arguments are not read on the front (Lichii #980, adapted to GPUs without mesh shaders).
 - **No re-upload of 64 KiB native uniform banks on every bind** in Ocarina of Time (thousands of render pass breaks a second on a tiled GPU).
 - **128 MiB NUP decompression cache on aarch64** (12 GB devices).
+- **Fixes and improvements from newer Lichii for Android commits**, picked onto this base:
+  - suspended channels polled every 50 µs;
+  - cheaper ASTC uploads, and no stale guest memory or overwritten uploads in new images;
+  - Ocarina of Time image fixes: the noperspective varyings behind the tomb's red line, the movie input copy, render passes kept after a deferred clear, and a larger occlusion query reset cap;
+  - Dynamic FPS keeps real game speed down to 10 fps.
+
+  A rebuild on the newer base itself runs correctly (with a GCC 13 fix, sent upstream) but was about 16% slower on the Thor, so Kokiri stays on this base for now.
 
 Investigation notes from the Thor (what limits the frame rate, what was tried and measured) are kept in [docs/kokiri/NOTES.md](docs/kokiri/NOTES.md).
 
