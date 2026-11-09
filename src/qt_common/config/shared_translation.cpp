@@ -277,9 +277,7 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "picks per game."));
     INSERT(Settings, scene_memory_cap, tr("Limit memory during scene loads:"),
            tr("Bounds the upload buffers a scene load keeps (256 MB) and frees large ones every "
-              "frame.
-Saves memory, but slows games that stream textures.
-Auto: Ocarina of "
+              "frame.\nSaves memory, but slows games that stream textures.\nAuto: Ocarina of "
               "Time only."));
     INSERT(Settings, native_compute_write_mark, tr("Native compute write mark:"),
            tr("How much of a Switch 2 compute shader's storage buffer is treated as written by "
