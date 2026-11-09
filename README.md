@@ -40,6 +40,7 @@ On top of Lichii for Android (pavelgajdo, early November 2026 base):
 - **Fewer waits on the split GPU thread** (ports of jpkto's Lichii #805 work): command entries wait only for the writers before the last host sync; GPU-written compute list words (Ocarina's culling counts) stay on the host GPU and are dispatched indirectly; greater-or-equal semaphore acquires are decided without draining the split; GPU-written mesh draw arguments are not read on the front (Lichii #980, adapted to GPUs without mesh shaders).
 - **No re-upload of 64 KiB native uniform banks on every bind** in Ocarina of Time (thousands of render pass breaks a second on a tiled GPU).
 - **128 MiB NUP decompression cache on aarch64** (12 GB devices).
+- **Macros that read memory run on the split's back thread** (Lichii #1056, jpkto's #805 back macros, adapted to this base): the front no longer waits for the back on every macro memory read. In Ocarina of Time's heaviest Kokiri Forest view on the Thor this took the frame rate from 9.9 to 15.4 fps.
 - **Fixes and improvements from newer Lichii for Android commits**, picked onto this base:
   - suspended channels polled every 50 µs;
   - cheaper ASTC uploads, and no stale guest memory or overwritten uploads in new images;
@@ -54,13 +55,14 @@ Investigation notes from the Thor (what limits the frame rate, what was tried an
 
 | Game | Status |
 |---|---|
-| The Legend of Zelda: Ocarina of Time (Switch 2) | Playable at 0.5x: about 17 fps average in Kokiri Forest gameplay (12–22 fps) with a warm shader cache. Movies and the intro run full speed. |
+| The Legend of Zelda: Ocarina of Time (Switch 2) | Playable at 0.5x with a warm shader cache: about 16 fps average walking around Kokiri Forest (10–26 fps); a fixed heavy view of the forest runs at 15.4 fps and a light one at 24 fps. Movies and the intro run full speed. |
 
 ## Recommended settings (Ocarina of Time on Adreno)
 
-- **Graphics:** resolution 0.5x, GPU accuracy Low, asynchronous shader building on, disk shader cache on.
+- **Graphics:** resolution 0.5x, GPU accuracy Low, asynchronous shader building on, disk shader cache on, reactive flushing on.
+- **Upscaling:** FSR with 25% sharpening, emulator anti-aliasing off (about 2% slower than ScaleForce + FXAA, with a sharper image).
 - **Ocarina of Time anti-aliasing:** *No sharpening* (skips the game's tensor-core sharpening network), with the built-in *Max Resolution* patch enabled.
-- **Environment** (launch script): `EDEN_NX2_HMMA_SHARED_B=1`, `EDEN_NX2_ASTC_MAX_DIM=1024`, and on 12 GB devices `EDEN_NX2_VRAM_LIMIT_MIB=3200`.
+- **Environment** (launch script): `EDEN_NX2_HMMA_SHARED_B=1`, `EDEN_NX2_ASTC_MAX_DIM=1024`, and on 12 GB devices `EDEN_NX2_VRAM_LIMIT_MIB=3200` (the launch scripts in the releases set these).
 - Keep the shader cache between sessions: the first visit to an area compiles pipelines and stutters; after that the area runs at its normal frame rate.
 
 ## Building (Linux aarch64)
@@ -91,4 +93,4 @@ See [LICENSE.txt](LICENSE.txt) and the source files for the applicable license t
 
 ### Resumo em português
 
-Kokiri é um fork do emulador de Switch / Switch 2 para portáteis ARM64 com pouca memória e GPUs Adreno mais antigas (Linux + Mesa Turnip). Testado em um AYN Thor Pro 256 GB + 12 GB (Snapdragon 8 Gen 2, Adreno 740). Traz HMMA por software em wave64 para Adreno a7xx, economia de memória para aparelhos de 12 GB e notas de investigação de desempenho. Ocarina of Time (Switch 2) é jogável a 0.5x, cerca de 17 fps de média em Kokiri com o cache de shaders já compilado.
+Kokiri é um fork do emulador de Switch / Switch 2 para portáteis ARM64 com pouca memória e GPUs Adreno mais antigas (Linux + Mesa Turnip). Testado em um AYN Thor Pro 256 GB + 12 GB (Snapdragon 8 Gen 2, Adreno 740). Traz HMMA por software em wave64 para Adreno a7xx, economia de memória para aparelhos de 12 GB e notas de investigação de desempenho. Ocarina of Time (Switch 2) é jogável a 0.5x, cerca de 16 fps de média andando em Kokiri (15 fps na vista mais pesada da floresta, 24 nas leves) com o cache de shaders já compilado. Recomendado: FSR com 25% de nitidez e sem anti-aliasing do emulador.
