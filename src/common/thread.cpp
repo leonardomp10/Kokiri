@@ -549,6 +549,59 @@ void SetCurrentThreadToPerformanceCores() {
 #endif
 }
 
+void PinCurrentThreadForRole([[maybe_unused]] KokiriThreadRole role) {
+#if defined(__linux__) && !defined(__ANDROID__) && defined(__aarch64__)
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_PIN");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (!enabled) {
+        return;
+    }
+    // Each CPU's highest frequency: the clusters of a big.LITTLE (or prime/mid/little) SoC.
+    static const std::vector<unsigned long> max_freq = [] {
+        std::vector<unsigned long> freqs;
+        for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+            const std::string path = "/sys/devices/system/cpu/cpu" + std::to_string(cpu) +
+                                     "/cpufreq/cpuinfo_max_freq";
+            FILE* file = std::fopen(path.c_str(), "r");
+            if (file == nullptr) {
+                break;
+            }
+            unsigned long freq = 0;
+            if (std::fscanf(file, "%lu", &freq) != 1) {
+                freq = 0;
+            }
+            std::fclose(file);
+            freqs.push_back(freq);
+        }
+        return freqs;
+    }();
+    if (max_freq.size() < 2) {
+        return;
+    }
+    const auto [lowest, highest] = std::minmax_element(max_freq.begin(), max_freq.end());
+    if (*lowest == *highest) {
+        return; // All cores alike
+    }
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    for (size_t cpu = 0; cpu < max_freq.size(); ++cpu) {
+        const bool fastest = max_freq[cpu] == *highest;
+        const bool slowest = max_freq[cpu] == *lowest;
+        if (role == KokiriThreadRole::Back ? fastest : !slowest) {
+            CPU_SET(cpu, &set);
+        }
+    }
+    if (CPU_COUNT(&set) == 0) {
+        return;
+    }
+    if (sched_setaffinity(0, sizeof(set), &set) != 0) {
+        LOG_WARNING(Common, "Kokiri thread pinning failed for role {}", static_cast<u32>(role));
+    }
+#endif
+}
+
 void SetCurrentThreadToEfficiencyCores() {
 #if defined(__ANDROID__)
     if (ADPF::AddCurrentThread(ADPF::Session::Background)) {
