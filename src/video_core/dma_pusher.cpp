@@ -9,6 +9,7 @@
 #include <map>
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cstdlib>
 #include <cstdio>
 #include <span>
@@ -24,6 +25,7 @@
 #include "video_core/control/channel_state.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/engines/maxwell_dma.h"
 #include "video_core/gpu.h"
 #include "video_core/gpu_split.h"
 #include "video_core/guest_memory.h"
@@ -279,6 +281,9 @@ bool DmaPusher::Step() {
             Nx2CmdPageDiag::CountEntry(Nx2CmdPageDiag::Path::Copy);
             command_resume_offset +=
                 ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
+        } else if (gpu_written && !use_safe && command_resume_offset == 0 &&
+                   DrawFromGpuArguments(header)) {
+            // The entry's words are a draw macro's parameters, left in GPU memory.
         } else if ((!use_safe || (accurate_list_copy && gpu_written)) &&
                    ReadGpuWrittenCommands(dma_state.dma_get, static_cast<u32>(header.size))) {
             const std::span<const CommandHeader> commands{command_headers.data(), header.size};
@@ -566,6 +571,9 @@ void DmaPusher::CallMethod(u32 argument) {
             }
             split.Method(subchannel, dma_state.method, argument, dma_state.is_last_call,
                          WantsSegment() ? &segment : nullptr);
+            if (engine_type == Engines::EngineTypes::MaxwellDMA) {
+                NoteDmaSemaphore(dma_state.method, argument);
+            }
             return;
         }
         if (!subchannel->execution_mask[dma_state.method]) {
@@ -633,6 +641,11 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
             }
             split.MultiMethod(subchannel, dma_state.method, base_start, num_methods,
                               dma_state.method_count, WantsSegment() ? &segment : nullptr);
+            if (engine_type == Engines::EngineTypes::MaxwellDMA) {
+                for (u32 i = 0; i < num_methods; ++i) {
+                    NoteDmaSemaphore(dma_state.method, base_start[i]);
+                }
+            }
             return;
         }
         VideoCommon::Nx2Profile::Scope method_scope{VideoCommon::Nx2Profile::Zone::Method};
@@ -683,6 +696,63 @@ bool DmaPusher::IsGpuWrittenCommands(GPUVAddr address, size_t size) {
         }
     }
     return false;
+}
+
+bool DmaPusher::DrawFromGpuArguments(const CommandListHeader& header) {
+    // The entry before this one opened the macro's start method with exactly as many words as
+    // this entry holds, and the GPU wrote them (the culling dispatch that sets task counts).
+    // Every word sent to a macro method is its next parameter, whatever the header's mode (the
+    // usual call is IncreaseOnce: the start method, then its parameter method). Port of Lichii
+    // #980.
+    auto& split = VideoCommon::GpuSplit::Get();
+    if (!split.Active() || !split.FrontMacros() || !g_nx2_ampere.load(std::memory_order_relaxed) ||
+        dma_state.method_count != header.size || dma_state.method < MacroRegistersStart ||
+        dma_state.subchannel >= max_subchannels || subchannels[dma_state.subchannel] == nullptr ||
+        subchannel_type[dma_state.subchannel] != Engines::EngineTypes::Maxwell3D) {
+        return false;
+    }
+    const GPUVAddr address = dma_state.dma_get;
+    const auto device = memory_manager.GpuToCpuAddress(address);
+    if (!device || !Tegra::Nx2IsGpuWritten(*device)) {
+        return false;
+    }
+    auto* const maxwell3d = static_cast<Engines::Maxwell3D*>(subchannels[dma_state.subchannel]);
+    if (!maxwell3d->GetNativeMacroEngine().native_turing ||
+        !maxwell3d->FrontDrawFromGpuArguments(system, split, dma_state.method, address,
+                                              static_cast<u32>(header.size))) {
+        return false;
+    }
+    dma_state.method_count = 0;
+    return true;
+}
+
+void DmaPusher::NoteDmaSemaphore(u32 method, u32 argument) {
+    // As MaxwellDMA::ReleaseSemaphore writes it on the back (GpuSplit::NoteSemaphoreWrite).
+    using Engines::MaxwellDMA;
+    if (method >= MaxwellDMA::SemaphoreMethod && method < MaxwellDMA::SemaphoreMethod + 3) {
+        dma_semaphore[method - MaxwellDMA::SemaphoreMethod] = argument;
+        return;
+    }
+    if (method != MaxwellDMA::LaunchDmaMethod) {
+        return;
+    }
+    using SemaphoreType = MaxwellDMA::LaunchDMA::SemaphoreType;
+    const auto type = std::bit_cast<MaxwellDMA::LaunchDMA>(argument).semaphore_type.Value();
+    if (type != SemaphoreType::RELEASE_ONE_WORD_SEMAPHORE &&
+        type != SemaphoreType::RELEASE_FOUR_WORD_SEMAPHORE) {
+        return;
+    }
+    const GPUVAddr address = MaxwellDMA::PackedGPUVAddr{dma_semaphore[0], dma_semaphore[1]};
+    const auto device = memory_manager.GpuToCpuAddress(address);
+    if (!device) {
+        return;
+    }
+    auto& split = VideoCommon::GpuSplit::Get();
+    split.NoteSemaphoreWrite(*device, dma_semaphore[2], true);
+    if (type == SemaphoreType::RELEASE_FOUR_WORD_SEMAPHORE) {
+        // The payload as 64 bits (a timestamp follows).
+        split.NoteSemaphoreWrite(*device + 4, 0, true);
+    }
 }
 
 bool DmaPusher::TakeGpuWrittenListWords(const CommandListHeader& header) {

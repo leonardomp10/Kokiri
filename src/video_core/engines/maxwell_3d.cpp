@@ -474,6 +474,9 @@ void Maxwell3D::TraceFirstMethodWrite(u32 method, u32 argument) {
 }
 
 void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument, bool is_last_call) {
+    if (draw_manager.pending_vertex_arguments) [[unlikely]] {
+        draw_manager.NoteVertexArgumentWrite(method);
+    }
     if (!fast_maxwell3d || executing_macro != 0 || method >= MacroRegistersStart ||
         method == MAXWELL3D_REG_INDEX(shadow_ram_control)) {
         return CallMethodSlow(system, method, method_argument, is_last_call);
@@ -706,6 +709,10 @@ void Maxwell3D::DumpRecentWrites(u32 method) {
 }
 
 void Maxwell3D::CallMultiMethod(Core::System& system, u32 method, const u32* base_start, u32 amount, u32 methods_pending) {
+    // Non-incrementing: every word goes to `method`.
+    if (draw_manager.pending_vertex_arguments && amount != 0) [[unlikely]] {
+        draw_manager.NoteVertexArgumentWrite(method);
+    }
     RecordWrite(method, amount ? base_start[0] : 0, amount, methods_pending);
     // Methods after 0xE00 are special, they're actually triggers for some microcode that was
     // uploaded to the GPU during initialization.
@@ -1036,6 +1043,10 @@ struct Maxwell3D::FrontState {
     /// then can it have a deferred instanced draw to issue at the end of a macro.
     bool draw_pending{true};
     bool skip_same{}; ///< SkipSameValueWrites() && FrontSkipSame(), read once
+    /// vertex_buffer.first (bit 0) and vertex_buffer.count (bit 1) came from GPU-written words
+    /// the front didn't read (FrontDrawFromGpuArguments): regs holds older values until each is
+    /// written again, so a write of the same value isn't dropped.
+    u32 vertex_arguments_unknown{};
     /// Macro DMA read snapshots (FrontDmaRead): device pages a drained read flushed whole, and the
     /// split position right after. Cleared past 8192 pages.
     std::unordered_map<u64, u64> dma_snapshots;
@@ -1162,6 +1173,15 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
     } else if (fs.control == Regs::ShadowRamControl::Replay) {
         value = fs.shadow[method];
     }
+    if (fs.vertex_arguments_unknown != 0) [[unlikely]] {
+        const u32 bit = method == MAXWELL3D_REG_INDEX(vertex_buffer.first)   ? 1U
+                        : method == MAXWELL3D_REG_INDEX(vertex_buffer.count) ? 2U
+                                                                             : 0U;
+        if ((fs.vertex_arguments_unknown & bit) != 0) {
+            fs.vertex_arguments_unknown &= ~bit;
+            shadow_kept = false; // Sent even if regs holds the value: the back's may differ.
+        }
+    }
     if (Profile::Enabled()) [[unlikely]] {
         Profile::Add(Profile::Counter::MethodWrites, 1);
     }
@@ -1224,6 +1244,32 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
     if (method == MAXWELL3D_REG_INDEX(report_semaphore.query) ||
         method == MAXWELL3D_REG_INDEX(launch_dma)) {
         NoteFrontMemoryWrite(split, memory_manager, fs.regs, method, value);
+    }
+    if (method == MAXWELL3D_REG_INDEX(report_semaphore.query)) {
+        FrontNoteReport(split, fs);
+    }
+}
+
+void Maxwell3D::FrontNoteReport(VideoCommon::GpuSplit& split, const FrontState& fs) {
+    // What ProcessQueryGet will write on the back: a payload report writes the payload, a counter
+    // what the GPU counted, a reduction what it makes of the word (port of Lichii #805 fb4d4e47).
+    Regs::ReportSemaphore report;
+    std::memcpy(&report, &fs.regs[MAXWELL3D_REG_INDEX(report_semaphore)], sizeof(report));
+    const auto operation = report.query.operation.Value();
+    if (operation != Regs::ReportSemaphore::Operation::Release &&
+        operation != Regs::ReportSemaphore::Operation::ReportOnly) {
+        return;
+    }
+    const auto device = memory_manager.GpuToCpuAddress(report.Address());
+    if (!device) {
+        return;
+    }
+    const bool payload = report.query.report == Regs::ReportSemaphore::Report::Payload &&
+                         report.query.reduction_enable == 0;
+    split.NoteSemaphoreWrite(*device, report.payload, payload);
+    if (report.query.short_query == 0) {
+        // 64 bits (a timestamp follows).
+        split.NoteSemaphoreWrite(*device + 4, 0, payload);
     }
 }
 
@@ -1334,6 +1380,9 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
                         method == MAXWELL3D_REG_INDEX(launch_dma))) {
         NoteFrontMemoryWrite(split, memory_manager, fs.regs, method, fs.regs[method]);
     }
+    if (method == MAXWELL3D_REG_INDEX(report_semaphore.query) && amount != 0) {
+        FrontNoteReport(split, fs);
+    }
 }
 
 namespace {
@@ -1427,6 +1476,123 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
     if (FrontVerifyEnabled() && (++fs.calls & 4095) == 0) [[unlikely]] {
         FrontVerify(split, fs);
     }
+}
+
+std::optional<Maxwell3D::GpuArgumentDraw> Maxwell3D::FrontGpuArgumentDraw(u32 start) {
+    auto& engine = GetNativeMacroEngine();
+    if (front_gpu_argument_generation != engine.native_code_generation) {
+        front_gpu_argument_generation = engine.native_code_generation;
+        front_gpu_argument_draws.clear();
+    }
+    if (const auto it = front_gpu_argument_draws.find(start); it != front_gpu_argument_draws.end()) {
+        return it->second;
+    }
+    // Run the macro on two pairs of marker parameters in a sandbox (its own data RAM, register
+    // reads answered with 0). It qualifies only if both runs consume exactly the two parameters
+    // and emit exactly draw.begin, vertex_buffer.first = the second, vertex_buffer.count = the
+    // first and draw.end, with the same constant begin and end values, reading nothing else.
+    const auto run = [&](u32 count, u32 first) -> std::optional<GpuArgumentDraw> {
+        TuringMacroInterpreter sandbox;
+        sandbox.dram = native_data_ram;
+        sandbox.active_dram = &sandbox.dram;
+        std::vector<u32> parameters{count, first};
+        std::vector<std::pair<u32, u32>> writes;
+        bool read_register = false;
+        const auto result = sandbox.Execute(
+            engine.native_code, start, parameters,
+            [&read_register](u32) {
+                read_register = true;
+                return 0U;
+            },
+            [&writes](u32 address, u32 value) {
+                writes.emplace_back(address, value);
+                return writes.size() <= 8;
+            });
+        if (!result.success || result.consumed != 2 || read_register || sandbox.read_registers ||
+            !sandbox.data_ram_reads.empty() || !sandbox.data_ram_writes.empty() ||
+            writes.size() != 4 || writes[0].first != MAXWELL3D_REG_INDEX(draw.begin) ||
+            writes[1] != std::pair{u32{MAXWELL3D_REG_INDEX(vertex_buffer.first)}, first} ||
+            writes[2] != std::pair{u32{MAXWELL3D_REG_INDEX(vertex_buffer.count)}, count} ||
+            writes[3].first != MAXWELL3D_REG_INDEX(draw.end)) {
+            return std::nullopt;
+        }
+        return GpuArgumentDraw{.begin = writes[0].second, .end = writes[3].second};
+    };
+    std::optional<GpuArgumentDraw> draw = run(0x13579, 0x2468a);
+    if (const auto again = run(0x5a5a5, 0xa5a5a);
+        !draw || !again || draw->begin != again->begin || draw->end != again->end) {
+        draw.reset();
+    }
+    if (draw) {
+        LOG_INFO(HW_GPU, "Native macro at {:#x} draws with its two parameters as vertex count "
+                         "and first vertex: GPU-written ones stay in GPU memory",
+                 start);
+    }
+    front_gpu_argument_draws.emplace(start, draw);
+    return draw;
+}
+
+bool Maxwell3D::FrontDrawFromGpuArguments(Core::System& system, VideoCommon::GpuSplit& split,
+                                          u32 method, GPUVAddr arguments, u32 words) {
+    // Port of Lichii #980: in Ocarina of Time a culling dispatch writes the task group count of
+    // each mesh draw into a command list entry that calls such a macro, which the front had to
+    // wait for the dispatch to read. EDEN_NX2_GPU_ARGUMENT_DRAWS=0 reads them as before.
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_GPU_ARGUMENT_DRAWS");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (!enabled || words != 2 || method < MacroRegistersStart || (method & 1) != 0) {
+        return false;
+    }
+    auto& fs = Front(system, split);
+    // In Replay mode the macro's writes would take the shadow RAM's values instead.
+    if (fs.executing_macro != 0 || !fs.parameters.empty() ||
+        fs.control == Regs::ShadowRamControl::Replay) {
+        return false;
+    }
+    const auto positions = GetNativeMacroPositions();
+    const u32 start = positions[((method - MacroRegistersStart) >> 1) % positions.size()];
+    const auto draw = FrontGpuArgumentDraw(start);
+    if (!draw) {
+        return false;
+    }
+    // Both words on one device page, contiguous.
+    const auto device = memory_manager.GpuToCpuAddress(arguments);
+    if (!device || (*device & 3) != 0 ||
+        memory_manager.GpuToCpuAddress(arguments + sizeof(u32)) != *device + sizeof(u32)) {
+        return false;
+    }
+    // What the macro does, but the two registers' values stay with the back (and in GPU
+    // memory): draw.begin as the macro's write, then the rest on the back.
+    VideoCommon::Nx2Profile::CountMethod(method, false);
+    FrontWrite(split, fs, MAXWELL3D_REG_INDEX(draw.begin), draw->begin, false, true);
+    // draw.end as FrontWrite would note it (the back runs it in DrawFromGpuArguments).
+    constexpr u32 end_method = MAXWELL3D_REG_INDEX(draw.end);
+    if (fs.control == Regs::ShadowRamControl::Track ||
+        fs.control == Regs::ShadowRamControl::TrackWithFilter) {
+        fs.shadow[end_method] = draw->end;
+    }
+    fs.regs[end_method] = draw->end;
+    fs.vertex_arguments_unknown = 3;
+    split.Defer([this, system_ptr = &system, arguments, device = *device, end = draw->end] {
+        DrawFromGpuArguments(*system_ptr, arguments, device, end);
+    });
+    // The end of the macro, as FrontRunMacro ends it (its writes include draw manager methods).
+    fs.draw_pending = false;
+    split.Defer([this, system_ptr = &system] { FinishFrontMacro(*system_ptr); });
+    return true;
+}
+
+void Maxwell3D::DrawFromGpuArguments(Core::System& system, GPUVAddr arguments, DAddr device,
+                                     u32 end_value) {
+    // As the macro's direct writes of vertex_buffer.first, vertex_buffer.count and draw.end,
+    // with the two registers left pending (DrawManager::ResolveVertexArguments).
+    ConsumeSink(system);
+    draw_manager.pending_vertex_arguments =
+        DrawManager::GpuVertexArguments{.address = arguments, .device = device, .unknown = 3};
+    draw_manager.gpu_draw_arguments = draw_manager.pending_vertex_arguments;
+    CallMethod(system, MAXWELL3D_REG_INDEX(draw.end), end_value, true);
+    draw_manager.gpu_draw_arguments.reset();
 }
 
 void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 macro,

@@ -29,6 +29,26 @@ namespace VideoCommon::Nx2FaultDiag {
     return enabled;
 }
 
+/// EDEN_NX2_UPLOAD_STATS: the buffer cache binding being made while an upload is recorded.
+enum class BindKind : u8 {
+    Other, Index, Vertex, Indirect, GfxUniform, GfxStorage, GfxTexel, Feedback, CompUniform,
+    CompStorage, CompTexel, Count,
+};
+inline constexpr std::array<const char*, static_cast<size_t>(BindKind::Count)> bind_kind_names{
+    "other", "index", "vertex", "indirect", "gfx uniform", "gfx storage", "gfx texel",
+    "feedback", "compute uniform", "compute storage", "compute texel",
+};
+inline thread_local BindKind t_bind_kind = BindKind::Other;
+struct BindScope {
+    explicit BindScope(BindKind kind) : previous{t_bind_kind} {
+        t_bind_kind = kind;
+    }
+    ~BindScope() {
+        t_bind_kind = previous;
+    }
+    BindKind previous;
+};
+
 /// Set by the GPU thread around the flush a guest write fault asks for, and the bytes it
 /// downloaded.
 inline thread_local bool t_in_fault = false;

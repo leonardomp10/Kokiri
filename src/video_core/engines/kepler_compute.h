@@ -292,6 +292,7 @@ private:
     struct FrontState;
     FrontState& Front(VideoCommon::GpuSplit& split);
     void FrontApply(FrontState& state, u32 method, u32 argument);
+    void FrontNoteReport(VideoCommon::GpuSplit& split, const FrontState& state, u32 control);
     MacroEngine& FrontMacroEngine(FrontState& state);
     std::span<u32> FrontMacroPositions(FrontState& state);
     void FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split, FrontState& state);

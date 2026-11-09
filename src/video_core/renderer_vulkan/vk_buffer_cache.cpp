@@ -17,6 +17,7 @@
 #include "video_core/nx2_perf.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
+#include "video_core/nx2_fault_diag.h"
 #include "video_core/renderer_vulkan/vertex_repack.h"
 
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
@@ -587,16 +588,26 @@ void BufferCacheRuntime::CopyBuffer(VkBuffer dst_buffer, VkBuffer src_buffer,
     // EDEN_NX2_UPLOAD_STATS=1: where copies go, every 10 s (uploads ahead or in order, and why).
     if (static const bool stats = std::getenv("EDEN_NX2_UPLOAD_STATS") != nullptr; stats) {
         static u64 ahead{}, used{}, not_stream{}, other{}, prior{};
+        static std::array<u64, static_cast<size_t>(VideoCommon::Nx2FaultDiag::BindKind::Count)>
+            used_by_kind{}, used_bytes{}, ahead_by_kind{};
         static auto window = std::chrono::steady_clock::now();
         const bool decided = std::exchange(upload_decided, false);
+        const size_t kind = static_cast<size_t>(VideoCommon::Nx2FaultDiag::t_bind_kind);
+        u64 bytes = 0;
+        for (const auto& copy : copies) {
+            bytes += copy.size;
+        }
         if (!decided) {
             ++other;
         } else if (!can_reorder_upload) {
             ++used;
+            ++used_by_kind[kind];
+            used_bytes[kind] += bytes;
         } else if (src_buffer != staging_pool.StreamBuf()) {
             ++not_stream;
         } else {
             ++ahead;
+            ++ahead_by_kind[kind];
             prior += wants_prior_barrier ? 1 : 0;
         }
         if (const auto now = std::chrono::steady_clock::now(); now - window >= std::chrono::seconds{10}) {
@@ -604,6 +615,17 @@ void BufferCacheRuntime::CopyBuffer(VkBuffer dst_buffer, VkBuffer src_buffer,
                      "Upload stats (10 s): ahead {} ({} behind the prior barrier), in order: used "
                      "in this submission {}, not from the stream buffer {}; other copies {}",
                      ahead, prior, used, not_stream, other);
+            for (size_t k = 0; k < used_by_kind.size(); ++k) {
+                if (used_by_kind[k] != 0 || ahead_by_kind[k] != 0) {
+                    LOG_INFO(Render_Vulkan,
+                             "Upload stats:   {}: in order {} ({} KiB), ahead {}",
+                             VideoCommon::Nx2FaultDiag::bind_kind_names[k], used_by_kind[k],
+                             used_bytes[k] / 1024, ahead_by_kind[k]);
+                }
+            }
+            used_by_kind.fill(0);
+            used_bytes.fill(0);
+            ahead_by_kind.fill(0);
             ahead = used = not_stream = other = prior = 0;
             window = now;
         }

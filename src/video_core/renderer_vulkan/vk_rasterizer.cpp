@@ -668,6 +668,15 @@ void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::Memory
 }
 } // Anonymous namespace
 
+bool RasterizerVulkan::DrawFromGpuArguments([[maybe_unused]] DAddr count_addr) {
+    // Port of Lichii #980 for devices without VK_EXT_mesh_shader: there the draw these words
+    // feed is a task/mesh draw PrepareDraw skips before recording anything, so it needs no
+    // count. Anything PrepareDraw would draw needs the words on the CPU (the caller reads them).
+    bool needs_count = false;
+    PrepareDraw(false, [&needs_count] { needs_count = true; }, true);
+    return !needs_count;
+}
+
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
     {

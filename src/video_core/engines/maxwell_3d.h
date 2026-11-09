@@ -3120,6 +3120,33 @@ public:
         void UpdateTopology(Maxwell3D& maxwell3d);
         void ProcessDraw(Maxwell3D& maxwell3d, bool draw_indexed, u32 instance_count);
         void ProcessDrawIndirect(Maxwell3D& maxwell3d);
+        /// The GPU-written words vertex_buffer.count and vertex_buffer.first came from
+        /// (Maxwell3D::DrawFromGpuArguments; port of Lichii #980): the draw ends without them
+        /// when the rasterizer skips it anyway (a task/mesh draw on a device without mesh
+        /// shaders), or reads them first.
+        struct GpuVertexArguments {
+            GPUVAddr address;
+            DAddr device;
+            u32 unknown; ///< Registers still holding older values: first (bit 0), count (bit 1)
+        };
+        /// Set while the end of such a draw runs.
+        std::optional<GpuVertexArguments> gpu_draw_arguments;
+        /// Registers that still hold older values: a draw that uses them reads the words first.
+        std::optional<GpuVertexArguments> pending_vertex_arguments;
+        /// Reads the words pending_vertex_arguments still marks into the registers.
+        void ResolveVertexArguments(Maxwell3D& maxwell3d);
+        /// DrawEnd's non-indexed draw from gpu_draw_arguments, when the rasterizer can make it
+        /// without the words (RasterizerInterface::DrawFromGpuArguments).
+        bool DrawFromGpuArguments(Maxwell3D& maxwell3d);
+        /// A write to vertex_buffer.first or .count: that register is known again.
+        void NoteVertexArgumentWrite(u32 method) noexcept {
+            const u32 bit = method == MAXWELL3D_REG_INDEX(vertex_buffer.first)   ? 1U
+                            : method == MAXWELL3D_REG_INDEX(vertex_buffer.count) ? 2U
+                                                                                 : 0U;
+            if (bit != 0 && (pending_vertex_arguments->unknown &= ~bit) == 0) {
+                pending_vertex_arguments.reset();
+            }
+        }
         State draw_state{};
         DrawTextureState draw_texture_state{};
         IndirectParams indirect_state{};
@@ -3198,6 +3225,16 @@ public:
 
     /// Write the value to the register identified by method.
     void CallMethod(Core::System& system, u32 method, u32 method_argument, bool is_last_call) override;
+
+    /// Split front: `words` GPU-written words at `arguments` are all the parameters of the macro
+    /// that starts at `method`. When the macro only draws with them (FrontGpuArgumentDraw), its
+    /// draw runs on the back from the words in GPU memory, without reading them here. False
+    /// otherwise: the caller reads the words as usual.
+    bool FrontDrawFromGpuArguments(Core::System& system, VideoCommon::GpuSplit& split, u32 method,
+                                   GPUVAddr arguments, u32 words);
+    /// Split back: the rest of such a macro after its draw.begin write.
+    void DrawFromGpuArguments(Core::System& system, GPUVAddr arguments, DAddr device,
+                              u32 end_value);
 
     /// Write multiple values to the register identified by method.
     void CallMultiMethod(Core::System& system, u32 method, const u32* base_start, u32 amount, u32 methods_pending) override;
@@ -3402,8 +3439,20 @@ private:
     void FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split, FrontState& state);
     void FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& state, u32 macro, u32 method,
                       u32 count);
+    void FrontNoteReport(VideoCommon::GpuSplit& split, const FrontState& state);
     void FrontVerify(VideoCommon::GpuSplit& split, FrontState& state);
     void FinishFrontMacro(Core::System& system);
+    /// What a native macro does with two parameters, found by running its code in a sandbox
+    /// (FrontGpuArgumentDraw): draw.begin = begin, vertex_buffer.first = second parameter,
+    /// vertex_buffer.count = first parameter, draw.end = end, and nothing else.
+    struct GpuArgumentDraw {
+        u32 begin;
+        u32 end;
+    };
+    /// The macro at native code position `start` as a GpuArgumentDraw, if it is one.
+    std::optional<GpuArgumentDraw> FrontGpuArgumentDraw(u32 start);
+    ::Common::unordered_map<u32, std::optional<GpuArgumentDraw>> front_gpu_argument_draws;
+    u64 front_gpu_argument_generation{~u64{0}};
     std::unique_ptr<FrontState> front;
     bool front_macros{};
     // EDEN_NX2_SPLIT_VERIFY: the last SET_SHADOW_RAM_CONTROL writes each side saw (argument,

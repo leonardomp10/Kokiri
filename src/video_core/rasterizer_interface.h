@@ -57,6 +57,13 @@ public:
     /// Dispatches an indirect draw invocation
     virtual void DrawIndirect() {}
 
+    /// Switch 2: the current non-indexed draw, whose vertex count and first vertex are the
+    /// GPU-written words at `count_addr`, without them: true when it needs neither (skipped as
+    /// the rasterizer skips such a draw anyway). False: the caller reads them and draws.
+    virtual bool DrawFromGpuArguments([[maybe_unused]] DAddr count_addr) {
+        return false;
+    }
+
     /// Dispatches an draw texture invocation
     virtual void DrawTexture() = 0;
 

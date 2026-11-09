@@ -1146,6 +1146,7 @@ bool BufferCache<P>::IsRegionCpuModified(DAddr addr, size_t size) {
 
 template <class P>
 void BufferCache<P>::BindHostIndexBuffer() {
+    const Nx2FaultDiag::BindScope nx2_bind_scope{Nx2FaultDiag::BindKind::Index};
     Buffer& buffer = slot_buffers[channel_state->index_buffer.buffer_id];
     TouchBuffer(buffer, channel_state->index_buffer.buffer_id);
     const u32 offset = buffer.Offset(channel_state->index_buffer.device_addr);
@@ -1266,6 +1267,7 @@ void BufferCache<P>::RefreshRepackedVertexBuffers() {
 
 template <class P>
 void BufferCache<P>::BindHostVertexBuffers() {
+    const Nx2FaultDiag::BindScope nx2_bind_scope{Nx2FaultDiag::BindKind::Vertex};
     RefreshRepackedVertexBuffers();
 
 #ifdef __ANDROID__
@@ -1359,6 +1361,7 @@ void BufferCache<P>::BindHostVertexBuffers() {
 
 template <class P>
 void BufferCache<P>::BindHostDrawIndirectBuffers() {
+    const Nx2FaultDiag::BindScope nx2_bind_scope{Nx2FaultDiag::BindKind::Indirect};
     const auto bind_buffer = [this](const Binding& binding) {
         Buffer& buffer = slot_buffers[binding.buffer_id];
         TouchBuffer(buffer, binding.buffer_id);
@@ -1376,6 +1379,7 @@ void BufferCache<P>::BindHostDrawIndirectBuffers() {
 
 template <class P>
 void BufferCache<P>::BindHostGraphicsUniformBuffers(size_t stage) {
+    const Nx2FaultDiag::BindScope nx2_bind_scope{Nx2FaultDiag::BindKind::GfxUniform};
     u32 dirty = ~0U;
     if constexpr (HAS_PERSISTENT_UNIFORM_BUFFER_BINDINGS) {
         dirty = std::exchange(channel_state->dirty_uniform_buffers[stage], 0);
@@ -1436,9 +1440,16 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
     // the memory tracker, leaving stale host contents, so upload such a bank again on every bind
     // (upstream 031e07436, 8b3aff59e). EDEN_NX2_BANK_REUPLOAD: 0 off, 1 once per frame,
     // 2 every bind of a 64 KiB bank (default), 3 every bind of any native bank.
+    // Ocarina of Time binds such banks thousands of times a second: uploaded again at each bind
+    // they were ~6,700 in-order copies (~170 MB) a second, each ending the render pass, for
+    // tables its native programs don't rewrite unnoticed. Off there unless the switch is set.
+    static constexpr u64 OcarinaOfTime = 0x0400486024DEC000ULL;
     static const char bank_mode = [] {
         const char* value = std::getenv("EDEN_NX2_BANK_REUPLOAD");
-        return value != nullptr ? value[0] : '2';
+        if (value != nullptr) {
+            return value[0];
+        }
+        return Settings::GetCurrentProgramID() == OcarinaOfTime ? '0' : '2';
     }();
     const u32 bank_size = (*channel_state->uniform_buffer_sizes)[stage][index];
     if (bank_mode != '0' && has_host_buffer && (bank_size == 0x10000 || bank_mode == '3') &&
@@ -1618,6 +1629,7 @@ bool BufferCache<P>::BindMultiRangeStorage(const Binding& binding, bool is_writt
 
 template <class P>
 void BufferCache<P>::BindHostGraphicsStorageBuffers(size_t stage) {
+    const Nx2FaultDiag::BindScope nx2_bind_scope{Nx2FaultDiag::BindKind::GfxStorage};
     u32 binding_index = 0;
     ForEachEnabledBit(channel_state->enabled_storage_buffers[stage], [&](u32 index) {
         const Binding& binding = channel_state->storage_buffers[stage][index];
@@ -1648,6 +1660,7 @@ void BufferCache<P>::BindHostGraphicsStorageBuffers(size_t stage) {
 
 template <class P>
 void BufferCache<P>::BindHostGraphicsTextureBuffers(size_t stage) {
+    const Nx2FaultDiag::BindScope nx2_bind_scope{Nx2FaultDiag::BindKind::GfxTexel};
     ForEachEnabledBit(channel_state->enabled_texture_buffers[stage], [&](u32 index) {
         const TextureBufferBinding& binding = channel_state->texture_buffers[stage][index];
         Buffer& buffer = slot_buffers[binding.buffer_id];
@@ -1676,6 +1689,7 @@ void BufferCache<P>::BindHostGraphicsTextureBuffers(size_t stage) {
 
 template <class P>
 void BufferCache<P>::BindHostTransformFeedbackBuffers() {
+    const Nx2FaultDiag::BindScope nx2_bind_scope{Nx2FaultDiag::BindKind::Feedback};
     if (maxwell3d->regs.transform_feedback_enabled == 0) {
         return;
     }
@@ -1709,6 +1723,7 @@ void BufferCache<P>::BindHostTransformFeedbackBuffers() {
 
 template <class P>
 void BufferCache<P>::BindHostComputeUniformBuffers() {
+    const Nx2FaultDiag::BindScope nx2_bind_scope{Nx2FaultDiag::BindKind::CompUniform};
     if constexpr (HAS_PERSISTENT_UNIFORM_BUFFER_BINDINGS) {
         // Mark all uniform buffers as dirty
         channel_state->dirty_uniform_buffers.fill(~u32{0});
@@ -1775,6 +1790,7 @@ void BufferCache<P>::BindHostComputeUniformBuffers() {
 
 template <class P>
 void BufferCache<P>::BindHostComputeStorageBuffers() {
+    const Nx2FaultDiag::BindScope nx2_bind_scope{Nx2FaultDiag::BindKind::CompStorage};
     u32 binding_index = 0;
     ForEachEnabledBit(channel_state->enabled_compute_storage_buffers, [&](u32 index) {
         const Binding& binding = channel_state->compute_storage_buffers[index];
@@ -1806,6 +1822,7 @@ void BufferCache<P>::BindHostComputeStorageBuffers() {
 
 template <class P>
 void BufferCache<P>::BindHostComputeTextureBuffers() {
+    const Nx2FaultDiag::BindScope nx2_bind_scope{Nx2FaultDiag::BindKind::CompTexel};
     ForEachEnabledBit(channel_state->enabled_compute_texture_buffers, [&](u32 index) {
         const TextureBufferBinding& binding = channel_state->compute_texture_buffers[index];
         Buffer& buffer = slot_buffers[binding.buffer_id];
@@ -2861,9 +2878,13 @@ inline void Nx2SampleDownloadStack() {
 
 template <class P>
 bool BufferCache<P>::Nx2MergeWriteFault(DAddr page_begin, u64 size) {
+    // Off unless EDEN_NX2_MERGE_FAULTS=1: in Ocarina of Time the GPU-written words the CPU reads
+    // next to its writes (the eye adaptation's luminance among them) reach guest memory a fence
+    // later than the fault's download put them there, and whole frames flash white (18 white
+    // captures in 12 min against 4, all in a bright scene, without it), for +0.5 fps.
     static const bool enabled = [] {
         const char* value = std::getenv("EDEN_NX2_MERGE_FAULTS");
-        return value == nullptr || value[0] != '0';
+        return value != nullptr && value[0] == '1';
     }();
     if (!enabled || IS_OPENGL) {
         return false;

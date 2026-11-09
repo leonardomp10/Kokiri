@@ -9,8 +9,10 @@
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <thread>
 #include <type_traits>
+#include <unordered_map>
 
 #include "common/common_types.h"
 
@@ -248,6 +250,17 @@ public:
     /// the writers a command list fetched now is ordered after. Returns whether any of it was
     /// still queued.
     bool WaitForSyncedWriters();
+    /// A semaphore release was just sent: once the back ran it, the word at `device_address` holds
+    /// `payload`, or a value the front can't tell (`known` false: a reduction, a counter report).
+    void NoteSemaphoreWrite(u64 device_address, u32 payload, bool known);
+    struct QueuedSemaphoreWrite {
+        u32 payload;
+        bool known;
+    };
+    /// The last write sent to the semaphore word at `device_address`, if the back may not have run
+    /// it yet.
+    [[nodiscard]] std::optional<QueuedSemaphoreWrite> QueuedSemaphoreWriteAt(
+        u64 device_address) const;
 
 private:
     friend struct GpuSplitTestAccess;
@@ -331,6 +344,14 @@ private:
     u64 pending_write_count{};
     u64 last_sync_position{};
     u64 last_mapping_change{};
+    struct SemaphoreWrite {
+        u64 position; ///< write_position once it was sent
+        u32 payload;
+        bool known;
+    };
+    /// The front's NoteSemaphoreWrite, by word address.
+    std::unordered_map<u64, SemaphoreWrite> semaphore_writes;
+    size_t semaphore_writes_limit = 1024; ///< Forget what the back ran past this many
     u64 published_local{};
     u64 consumed_cache{};
     /// Words between publishes: small right after a drain, while the back has nothing to do.

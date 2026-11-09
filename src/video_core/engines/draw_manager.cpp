@@ -4,13 +4,17 @@
 // SPDX-FileCopyrightText: Copyright 2022 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
+#include <atomic>
 #include <cstring>
 #include <set>
 #include <tuple>
 
+#include "common/logging.h"
 #include "common/settings.h"
 #include "video_core/dirty_flags.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/memory_manager.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/render_trace.h"
 
@@ -261,7 +265,13 @@ void Maxwell3D::DrawManager::DrawEnd(Maxwell3D& maxwell3d, u32 instance_count, b
         if (draw_state.draw_indexed) {
             draw_state.index_buffer = maxwell3d.regs.index_buffer;
             ProcessDraw(maxwell3d, true, instance_count);
+        } else if (gpu_draw_arguments && instance_count == 1 &&
+                   DrawFromGpuArguments(maxwell3d)) {
+            // Made without the GPU-written words; the registers stay pending.
         } else {
+            if (pending_vertex_arguments) {
+                ResolveVertexArguments(maxwell3d);
+            }
             draw_state.vertex_buffer = maxwell3d.regs.vertex_buffer;
             ProcessDraw(maxwell3d, false, instance_count);
         }
@@ -346,6 +356,40 @@ void Maxwell3D::DrawManager::ProcessDraw(Maxwell3D& maxwell3d, bool draw_indexed
         maxwell3d.rasterizer->Draw(draw_indexed, instance_count);
     } else {
         TraceSuppressedDraw(maxwell3d, false);
+    }
+}
+
+bool Maxwell3D::DrawManager::DrawFromGpuArguments(Maxwell3D& maxwell3d) {
+    // As ProcessDraw, with the vertex count (a task/mesh draw's group count) left in GPU memory;
+    // a draw the rasterizer can't make that way reads it (the caller).
+    draw_state.vertex_buffer = maxwell3d.regs.vertex_buffer;
+    draw_state.draw_element_count = 0;
+    UpdateTopology(maxwell3d);
+    if (!maxwell3d.ShouldExecute()) {
+        TraceSuppressedDraw(maxwell3d, true);
+        return true;
+    }
+    return maxwell3d.rasterizer->DrawFromGpuArguments(gpu_draw_arguments->device);
+}
+
+void Maxwell3D::DrawManager::ResolveVertexArguments(Maxwell3D& maxwell3d) {
+    const GpuVertexArguments pending = *pending_vertex_arguments;
+    pending_vertex_arguments.reset();
+    static std::atomic<u64> resolved{};
+    if (const u64 count = resolved.fetch_add(1, std::memory_order_relaxed) + 1;
+        (count & 255) == 1) {
+        LOG_INFO(HW_GPU, "GPU-argument draws: {} read their words on the back", count);
+    }
+    // The caches hold the words the GPU wrote.
+    maxwell3d.rasterizer->FlushRegion(pending.device, 2 * sizeof(u32),
+                                      VideoCommon::CacheType::BufferCache);
+    std::array<u32, 2> words{};
+    maxwell3d.memory_manager.ReadBlockUnsafe(pending.address, words.data(), sizeof(words));
+    if ((pending.unknown & 1) != 0) {
+        maxwell3d.regs.vertex_buffer.first = words[1];
+    }
+    if ((pending.unknown & 2) != 0) {
+        maxwell3d.regs.vertex_buffer.count = words[0];
     }
 }
 

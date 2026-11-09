@@ -239,6 +239,13 @@ public:
     /// take them over (Nx2ListIndirect), puts their placeholders in command_headers instead of
     /// reading them. The back copies the words at the list's place on the host GPU.
     bool TakeGpuWrittenListWords(const CommandListHeader& header);
+    /// A copy engine method sent to the split's back: a launch that releases its semaphore tells
+    /// the front what it writes (GpuSplit::NoteSemaphoreWrite).
+    void NoteDmaSemaphore(u32 method, u32 argument);
+    /// A GPU-written entry whose words are all the parameters of a 3D macro that only draws with
+    /// them (Maxwell3D::FrontDrawFromGpuArguments): the draw is sent without reading the words.
+    /// False when it isn't one; the caller reads the entry as usual.
+    bool DrawFromGpuArguments(const CommandListHeader& header);
     /// Brings command list words the GPU wrote (still only in host buffers) to guest memory.
     bool FlushGpuWrittenCommands(GPUVAddr address, size_t size);
 
@@ -293,6 +300,8 @@ public:
 
     std::array<Engines::EngineInterface*, max_subchannels> subchannels{};
     std::array<Engines::EngineTypes, max_subchannels> subchannel_type;
+    /// The copy engine's semaphore address (high, low) and payload as sent (NoteDmaSemaphore).
+    std::array<u32, 3> dma_semaphore{};
 
     Engines::Puller puller;
     std::mutex sync_mutex;
