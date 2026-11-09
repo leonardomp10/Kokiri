@@ -40,7 +40,7 @@ On top of Lichii for Android (pavelgajdo, early November 2026 base):
 - **Fewer waits on the split GPU thread** (ports of jpkto's Lichii #805 work): command entries wait only for the writers before the last host sync; GPU-written compute list words (Ocarina's culling counts) stay on the host GPU and are dispatched indirectly; greater-or-equal semaphore acquires are decided without draining the split; GPU-written mesh draw arguments are not read on the front (Lichii #980, adapted to GPUs without mesh shaders).
 - **No re-upload of 64 KiB native uniform banks on every bind** in Ocarina of Time (thousands of render pass breaks a second on a tiled GPU).
 - **128 MiB NUP decompression cache on aarch64** (12 GB devices).
-- **Macros that read memory run on the split's back thread** (Lichii #1056, jpkto's #805 back macros, adapted to this base): the front no longer waits for the back on every macro memory read. In Ocarina of Time's heaviest Kokiri Forest view on the Thor this took the frame rate from 9.9 to 15.4 fps.
+- **Macros that read memory run on the split's back thread** (Lichii #1056, jpkto's #805 back macros, adapted to this base): the front no longer waits for the back on every macro memory read. No frame-rate gain is proven on the Thor yet (heavy views stay around 10 fps).
 - **Fixes and improvements from newer Lichii for Android commits**, picked onto this base:
   - suspended channels polled every 50 µs;
   - cheaper ASTC uploads, and no stale guest memory or overwritten uploads in new images;
@@ -55,7 +55,7 @@ Investigation notes from the Thor (what limits the frame rate, what was tried an
 
 | Game | Status |
 |---|---|
-| The Legend of Zelda: Ocarina of Time (Switch 2) | Playable at 0.5x with a warm shader cache: about 16 fps average walking around Kokiri Forest (10–26 fps); a fixed heavy view of the forest runs at 15.4 fps and a light one at 24 fps. Movies and the intro run full speed. |
+| The Legend of Zelda: Ocarina of Time (Switch 2) | Playable at 0.5x with a warm shader cache: about 16 fps average walking around Kokiri Forest (10–26 fps); fixed views of the forest range from about 10 fps (heaviest) to 24 fps (light). Movies and the intro run full speed. |
 
 ## Recommended settings (Ocarina of Time on Adreno)
 
@@ -93,4 +93,4 @@ See [LICENSE.txt](LICENSE.txt) and the source files for the applicable license t
 
 ### Resumo em português
 
-Kokiri é um fork do emulador de Switch / Switch 2 para portáteis ARM64 com pouca memória e GPUs Adreno mais antigas (Linux + Mesa Turnip). Testado em um AYN Thor Pro 256 GB + 12 GB (Snapdragon 8 Gen 2, Adreno 740). Traz HMMA por software em wave64 para Adreno a7xx, economia de memória para aparelhos de 12 GB e notas de investigação de desempenho. Ocarina of Time (Switch 2) é jogável a 0.5x, cerca de 16 fps de média andando em Kokiri (15 fps na vista mais pesada da floresta, 24 nas leves) com o cache de shaders já compilado. Recomendado: FSR com 25% de nitidez e sem anti-aliasing do emulador.
+Kokiri é um fork do emulador de Switch / Switch 2 para portáteis ARM64 com pouca memória e GPUs Adreno mais antigas (Linux + Mesa Turnip). Testado em um AYN Thor Pro 256 GB + 12 GB (Snapdragon 8 Gen 2, Adreno 740). Traz HMMA por software em wave64 para Adreno a7xx, economia de memória para aparelhos de 12 GB e notas de investigação de desempenho. Ocarina of Time (Switch 2) é jogável a 0.5x, cerca de 16 fps de média andando em Kokiri (cerca de 10 fps nas vistas mais pesadas da floresta, 24 nas leves) com o cache de shaders já compilado. Recomendado: FSR com 25% de nitidez e sem anti-aliasing do emulador.
