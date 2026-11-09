@@ -1063,9 +1063,10 @@ void HostMemory::HintCold(size_t physical_offset, size_t length,
 #ifdef _WIN32
         // Unlocking pages that are not locked takes them out of the working set.
         VirtualUnlock(address, length);
-#elif defined(__ANDROID__) && defined(MADV_PAGEOUT)
+#elif (defined(__ANDROID__) || defined(__aarch64__)) && defined(MADV_PAGEOUT)
         // Android swaps to zram only, and its low-memory killer acts on resident memory: page
-        // out right away instead of waiting for reclaim.
+        // out right away instead of waiting for reclaim. ARM Linux handhelds (AYN Thor) are the
+        // same: 12 GB of RAM, zram swap, and reclaim under pressure stalls the whole system.
         madvise(address, length, MADV_PAGEOUT);
 #elif defined(__linux__) && defined(MADV_COLD)
         // MADV_COLD only deactivates the pages, like VirtualUnlock. MADV_PAGEOUT writes them to
