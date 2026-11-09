@@ -37,6 +37,22 @@ namespace Tegra {
 constexpr u32 MacroRegistersStart = 0xE00;
 constexpr u32 ComputeInline = 0x6D;
 
+namespace {
+
+/// The split's position after the last copy engine method that may write memory (the front's).
+u64 g_last_copy_writer{};
+
+/// Whether copy engine work sent so far may still be queued on the split's back. A new session
+/// starts the split's positions over: a position past the current one is from an older session.
+[[nodiscard]] bool CopyWritersPending(const VideoCommon::GpuSplit& split) {
+    if (g_last_copy_writer > split.SentPosition()) {
+        g_last_copy_writer = 0;
+    }
+    return !split.Ran(g_last_copy_writer);
+}
+
+} // Anonymous namespace
+
 bool DmaPusher::IsMemoryWriter(const Engines::EngineInterface& engine, Engines::EngineTypes type,
                               u32 method) {
     if (type == Engines::EngineTypes::KeplerCompute) {
@@ -205,8 +221,25 @@ bool DmaPusher::Step() {
             const char* value = std::getenv("EDEN_NX2_ACCURATE_LIST_COPY");
             return value && value[0] == '1' && value[1] == '\0';
         }();
-        if (!gpu_written && VideoCommon::GpuSplit::Get().Active() &&
-            VideoCommon::GpuSplit::Get().WaitForWriters()) {
+        // Pages no GPU work has written yet may still get the list from compute or copy work
+        // queued before it (ported from Lichii #805, 6229487c and d4e8d85d). The GPU fetches the
+        // list after that work only past a host-level wait (NoteSync): later work is not ordered
+        // before the fetch, and the list does not wait for it. Lists that begin between methods
+        // don't wait for compute work either: they are command buffers the CPU writes. The words
+        // GPU work writes for the front to fetch are the parameters of a method begun in the entry
+        // before (Ocarina of Time's 0xe62 and 0xe74), which begin inside its data. The copy engine
+        // can copy GPU-written words anywhere: while its work is queued, every list waits.
+        // EDEN_NX2_ENTRY_WAIT=1 restores the old wait for every writer before every entry.
+        static const bool old_entry_wait = [] {
+            const char* value = std::getenv("EDEN_NX2_ENTRY_WAIT");
+            return value && value[0] == '1' && value[1] == '\0';
+        }();
+        const bool command_entry = dma_state.method_count == 0;
+        const bool waits_for_writers =
+            old_entry_wait || !command_entry || CopyWritersPending(VideoCommon::GpuSplit::Get());
+        if (!gpu_written && VideoCommon::GpuSplit::Get().Active() && waits_for_writers &&
+            (old_entry_wait ? VideoCommon::GpuSplit::Get().WaitForWriters()
+                            : VideoCommon::GpuSplit::Get().WaitForSyncedWriters())) {
             gpu_written =
                 IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
         }
@@ -488,6 +521,9 @@ void DmaPusher::CallMethod(u32 argument) {
         SCOPE_EXIT {
             if (writer) {
                 split.NoteWriter();
+                if (engine_type == Engines::EngineTypes::MaxwellDMA) {
+                    g_last_copy_writer = split.SentPosition();
+                }
             } else if (unranged_writer) {
                 split.NoteUnrangedWriter();
             }
@@ -552,6 +588,9 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
         SCOPE_EXIT {
             if (writer) {
                 split.NoteWriter();
+                if (engine_type == Engines::EngineTypes::MaxwellDMA) {
+                    g_last_copy_writer = split.SentPosition();
+                }
             } else if (unranged_writer) {
                 split.NoteUnrangedWriter();
             }

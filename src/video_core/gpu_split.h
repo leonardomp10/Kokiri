@@ -193,6 +193,11 @@ public:
     [[nodiscard]] u64 SentPosition() const {
         return write_position;
     }
+    /// Whether the back executed everything sent before `position`. It may tell so a little
+    /// late: the back stores its position every few thousand words and when it runs out of work.
+    [[nodiscard]] bool Ran(u64 position) const {
+        return consumed.load(std::memory_order_acquire) >= position;
+    }
     /// Whether work sent after position `since` may write device bytes [begin, begin + size):
     /// compute or copies (any range), unranged writers, or a noted write overlapping the range.
     /// Also true when more writes were noted since than are remembered.
@@ -229,6 +234,10 @@ public:
     /// Waits until the back executed the work sent before the last NoteSync. Returns whether any
     /// of it was still queued.
     bool WaitForSync();
+    /// Waits until the back executed the compute and copy work sent before the last NoteSync:
+    /// the writers a command list fetched now is ordered after. Returns whether any of it was
+    /// still queued.
+    bool WaitForSyncedWriters();
 
 private:
     friend struct GpuSplitTestAccess;
