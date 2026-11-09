@@ -374,6 +374,12 @@ BufferCacheRuntime::BufferCacheRuntime(const Device& device_, MemoryAllocator& m
       quad_index_pass(device, scheduler, descriptor_pool, staging_pool,
                       compute_pass_descriptor_queue),
       multi_range_buffers(device_) {
+    {
+        // Nx2ListIndirect: a dispatch width over the device's limit must never reach an indirect
+        // dispatch (Turnip dispatches at most 65535 groups in each dimension).
+        const std::array<u32, 3> max_dim{device.GetMaxComputeWorkGroupCount()};
+        nx2_list_slots.SetNarrowWidth(max_dim[0] < 0x7fffffffU);
+    }
     const VkDriverIdKHR driver_id = device.GetDriverID();
     const bool enable_vertex_repack = VertexRepackEnabled();
     LOG_INFO(Render_Vulkan, "69-byte vertex layout repacking {} ({})",

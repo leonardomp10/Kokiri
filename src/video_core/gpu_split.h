@@ -40,13 +40,14 @@ enum class DrainSite : u32 {
     Map,            ///< GPU memory maps before later command reads
     FrontStart,     ///< The front takes an engine's macros over
     FrontVerify,    ///< EDEN_NX2_FRONT_VERIFY
+    ListSlots,      ///< GPU-written list words the host GPU kept, read back (Nx2ListIndirect)
     Count,
 };
 
 inline constexpr std::array<const char*, static_cast<size_t>(DrainSite::Count)> drain_site_names{
     "other",       "fetch drain",     "acquire",    "semaphore flush", "fence release",
     "list writers", "list sync",      "list flush", "macro dma read",  "macro dma flush",
-    "gp sync fence", "map",           "front start", "front verify",
+    "gp sync fence", "map",           "front start", "front verify", "list slots",
 };
 
 // Splits the GPU thread in two (NX2_GPU_THREAD_SPLIT.md). The GPU thread (the front) takes the
@@ -193,6 +194,15 @@ public:
     [[nodiscard]] u64 SentPosition() const {
         return write_position;
     }
+    /// A RunCommand (GPU memory map or unmap, among others) was just sent to the back: the
+    /// front's GPU address translations may differ from the back's until it ran.
+    void NoteMappingChange() {
+        last_mapping_change = write_position;
+    }
+    /// The position after the last RunCommand sent (NoteMappingChange).
+    [[nodiscard]] u64 LastMappingChange() const {
+        return (std::min)(last_mapping_change, write_position);
+    }
     /// Whether the back executed everything sent before `position`. It may tell so a little
     /// late: the back stores its position every few thousand words and when it runs out of work.
     [[nodiscard]] bool Ran(u64 position) const {
@@ -320,6 +330,7 @@ private:
     std::array<PendingWrite, 4096> pending_writes{};
     u64 pending_write_count{};
     u64 last_sync_position{};
+    u64 last_mapping_change{};
     u64 published_local{};
     u64 consumed_cache{};
     /// Words between publishes: small right after a drain, while the back has nothing to do.

@@ -8,6 +8,7 @@
 #include <atomic>
 #include <bit>
 #include <bitset>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -29,6 +30,7 @@
 #include "video_core/ocarina_movie.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_list_indirect.h"
 #include "video_core/engines/fermi_2d.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
@@ -77,7 +79,11 @@ KeplerCompute::KeplerCompute(MemoryManager& memory_manager_)
     }
 }
 
-KeplerCompute::~KeplerCompute() = default;
+KeplerCompute::~KeplerCompute() {
+    if (native_data_ram != nullptr) {
+        Nx2ListIndirect::ForgetChannel(native_data_ram);
+    }
+}
 
 void KeplerCompute::BindRasterizer(VideoCore::RasterizerInterface* rasterizer_) {
     rasterizer = rasterizer_;
@@ -314,6 +320,13 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
         }
         rasterizer->AccelerateInlineToMemory(address, 256,
             std::span<const u8>{reinterpret_cast<const u8*>(native_registers.data() + 0xc8), 256});
+        if (const auto device = memory_manager.GpuToCpuAddress(address)) {
+            // The slots the grid's list word placeholders name stay for its launches
+            // (Nx2ListIndirect).
+            rasterizer->Nx2NoteInlineQmdGrid(*device, native_registers[0xc8 + 12],
+                                             native_registers[0xc8 + 13],
+                                             native_registers[0xc8 + 14]);
+        }
         if ((control & (1U << 24)) || !(native_registers[0xcc] & (1U << 12))) {
             const u32 previous = native_registers[0xad];
             native_registers[0xad] = static_cast<u32>(address >> 8);
@@ -531,7 +544,37 @@ void KeplerCompute::CallMultiMethod(Core::System& system, u32 method, const u32*
     }
 }
 
-bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& qmd) {
+bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& descriptor) {
+    // A grid of GPU-written list words (Nx2ListIndirect): one slot's three words, which the host
+    // GPU dispatches from, or placeholders of several, whose words the back reads.
+    NativeQmdScheduler::Descriptor resolved;
+    const bool listed = Nx2ListIndirect::IsPlaceholder(descriptor[12]) ||
+                        Nx2ListIndirect::IsPlaceholder(descriptor[13]) ||
+                        Nx2ListIndirect::IsPlaceholder(descriptor[14]);
+    if (listed) [[unlikely]] {
+        indirect_list_slot =
+            Nx2ListIndirect::GridSlot(descriptor[12], descriptor[13], descriptor[14]);
+        if (!indirect_list_slot) {
+            resolved = descriptor;
+            for (const u32 word : {12U, 13U, 14U}) {
+                if (Nx2ListIndirect::IsPlaceholder(resolved[word])) {
+                    const u32 slot = Nx2ListIndirect::PlaceholderSlot(resolved[word]);
+                    std::array<u32, Nx2ListIndirect::SlotWords> words{};
+                    rasterizer->Nx2ReadListSlots(std::span<const u32>{&slot, 1}, words);
+                    resolved[word] = words[Nx2ListIndirect::PlaceholderWord(resolved[word])];
+                }
+            }
+            // An empty grid dispatches nothing (NativeQmdScheduler::Signal does not call this).
+            if (!(resolved[12] && (resolved[13] & 0xffff) && (resolved[14] & 0xffff))) {
+                return true;
+            }
+        }
+    }
+    SCOPE_EXIT {
+        indirect_list_slot.reset();
+    };
+    const NativeQmdScheduler::Descriptor& qmd =
+        listed && !indirect_list_slot ? resolved : descriptor;
     launch_description = {};
     launch_description.grid_dim_x.Assign(qmd[12]);
     launch_description.grid_dim_y.Assign(qmd[13] & 0xffff);
@@ -561,7 +604,7 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
     if (const u64 groups = u64{launch_description.grid_dim_x.Value()} *
                            launch_description.grid_dim_y.Value() *
                            launch_description.grid_dim_z.Value();
-        groups > (u64{1} << 20)) {
+        !indirect_list_slot && groups > (u64{1} << 20)) {
         static u32 logged{};
         if (logged++ < 64) {
             LOG_WARNING(HW_GPU, "Native compute dispatch of {}x{}x{} groups ({}x{}x{} threads) at {:#x}",
@@ -1465,6 +1508,86 @@ Texture::TSCEntry KeplerCompute::GetTSCEntry(u32 tsc_index) const {
     return tsc_entry;
 }
 
+namespace {
+
+// A compute macro call as Nx2ListIndirect::ComputeFront sees it (its Context).
+template <typename EmitFunc>
+struct ListCallContext {
+    std::span<const u32> code;
+    u64 generation;
+    u32 start;
+    std::vector<u32>& params;
+    std::span<u32> data_ram;
+    std::span<const u32> registers;
+    Nx2ListIndirect::UploadState upload;
+    VideoCommon::GpuSplit& split;
+    const MemoryManager& memory;
+    VideoCore::RasterizerInterface* rasterizer;
+    EngineInterface* engine;
+    std::array<u32, 0x1000>& front_registers;
+    const EmitFunc& emit;
+
+    [[nodiscard]] std::optional<u64> DeviceWord(u64 gpu_address) const {
+        if (!split.Ran(split.LastMappingChange())) {
+            return std::nullopt; // The back may find other mappings
+        }
+        const auto first = memory.GpuToCpuAddress(gpu_address);
+        const auto last = memory.GpuToCpuAddress(gpu_address + 3);
+        if (!first || !last || *last != *first + 3) {
+            return std::nullopt;
+        }
+        return u64{*first};
+    }
+    void Emit(u32 method, u32 value) const {
+        emit(method, value);
+    }
+    void SendOwed(u64 device, u32 value) const {
+        split.Defer([rasterizer_ = rasterizer, device,
+                     value] { rasterizer_->Nx2NoteOwedListWord(device, value); });
+    }
+    void Release(u32 slot) const {
+        Nx2ListIndirect::ReleaseSlot(split, rasterizer, slot);
+    }
+    void ReadSlots(std::span<const u32> slots, std::span<u32> words) const {
+        Nx2ListIndirect::ReadSlots(split, rasterizer, slots, words);
+    }
+    void SetRegister(u32 method, u32 value) const {
+        front_registers[method] = value;
+        if (method == Nx2ListIndirect::UploadData) {
+            return; // The upload's data port: only macros read it back, from the front's copy
+        }
+        split.MacroWrite(engine, method, value);
+    }
+};
+
+// EDEN_NX2_LIST_WAIT_STATS: how the compute front handled GPU-written list words, every 10 s.
+struct ListIndirectStats {
+    u64 tagged_runs{};
+    u64 concretized[static_cast<size_t>(Nx2ListIndirect::Reason::Count)]{};
+    std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
+
+    void Maybe() {
+        static const bool enabled = std::getenv("EDEN_NX2_LIST_WAIT_STATS") != nullptr;
+        if (!enabled) {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now - window < std::chrono::seconds{10}) {
+            return;
+        }
+        LOG_INFO(HW_GPU,
+                 "List indirect (10 s): tagged runs {}, concretized: escaped {} failed {} sink {} "
+                 "upload {} macro3d {}",
+                 tagged_runs, concretized[0], concretized[1], concretized[2], concretized[3],
+                 concretized[4]);
+        *this = {};
+        window = now;
+    }
+};
+ListIndirectStats g_list_stats;
+
+} // Anonymous namespace
+
 // Split GPU thread with macros on its front half (gpu_split.h, EDEN_NX2_SPLIT=2): the front
 // runs compute macros against its own copy of the native registers (which hold the last value
 // written to each, on the back too) and loads and binds the compute macro code itself.
@@ -1475,6 +1598,8 @@ struct KeplerCompute::FrontState {
     bool compute_uploaded{};
     u32 bind_pointer{};
     MacroEngine* macro{}; ///< Without a native context: the one macro engine
+    /// The inline upload the back runs, where a word of it lands (Nx2ListIndirect).
+    Nx2ListIndirect::UploadState upload;
 };
 
 KeplerCompute::FrontState& KeplerCompute::Front(VideoCommon::GpuSplit& split) {
@@ -1500,6 +1625,8 @@ void KeplerCompute::FrontApply(FrontState& fs, u32 method, u32 argument) {
     if (method == 0x45 || method == 0x47) {
         fs.compute_uploaded = true;
     }
+    Nx2ListIndirect::NoteUploadMethod(fs.upload, method, argument,
+                                      [&fs](u32 reg) { return fs.registers[reg]; });
     fs.registers[method] = argument;
     switch (method) {
     case 0x45:
@@ -1584,6 +1711,40 @@ void KeplerCompute::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuS
     split.MultiMethod(this, method, base_start, amount, methods_pending, segment);
 }
 
+bool KeplerCompute::FrontTakeListWords(VideoCommon::GpuSplit& split, u32 method, u32 count,
+                                       u32 slot) {
+    if (!native_mode || native_data_ram == nullptr) {
+        return false;
+    }
+    auto& fs = Front(split);
+    if (fs.executing_macro || !fs.parameters.empty()) {
+        return false; // Not a call's first parameter
+    }
+    if (!list_front) {
+        list_front = std::make_unique<Nx2ListIndirect::ComputeFront>();
+    }
+    const auto positions = FrontMacroPositions(fs);
+    const u32 start = positions[((method - 0xe00) / 2) % positions.size()];
+    const auto& macro = FrontMacroEngine(fs);
+    const auto no_emit = [](u32, u32) { return false; };
+    std::vector<u32> no_params;
+    ListCallContext<decltype(no_emit)> context{macro.native_code,
+                                               macro.native_code_generation,
+                                               start,
+                                               no_params,
+                                               std::span<u32>{*native_data_ram},
+                                               fs.registers,
+                                               fs.upload,
+                                               split,
+                                               memory_manager,
+                                               rasterizer,
+                                               this,
+                                               fs.registers,
+                                               no_emit};
+    return list_front->PrepareCall(context, Nx2ListIndirect::GetChannel(native_data_ram), slot,
+                                   count);
+}
+
 void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split,
                                   FrontState& fs) {
     const auto positions = FrontMacroPositions(fs);
@@ -1605,6 +1766,37 @@ void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& s
         split.MacroWrite(this, address, value);
         return true;
     };
+    if (list_front && native_data_ram != nullptr) {
+        // GPU-written list words among the call's parameters or within its reach: a tagged run
+        // that leaves them to the back, or the words themselves first (Nx2ListIndirect).
+        ListCallContext<decltype(emit)> context{macro.native_code,
+                                                macro.native_code_generation,
+                                                start,
+                                                fs.parameters,
+                                                std::span<u32>{*native_data_ram},
+                                                fs.registers,
+                                                fs.upload,
+                                                split,
+                                                memory_manager,
+                                                rasterizer,
+                                                this,
+                                                fs.registers,
+                                                emit};
+        bool concretized{};
+        Nx2ListIndirect::Reason reason{};
+        const bool tagged = list_front->Run(
+            context, Nx2ListIndirect::GetChannel(native_data_ram), concretized, reason);
+        if (tagged) {
+            ++g_list_stats.tagged_runs;
+        } else if (concretized) {
+            ++g_list_stats.concretized[static_cast<size_t>(reason)];
+        }
+        g_list_stats.Maybe();
+        if (tagged) {
+            fs.parameters.clear();
+            return;
+        }
+    }
 #ifdef ARCHITECTURE_x86_64
     if (!macro.native_jit) {
         macro.native_jit = std::make_shared<TuringMacroJit>();

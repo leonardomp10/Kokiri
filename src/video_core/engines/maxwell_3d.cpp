@@ -26,6 +26,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_cmdpage_diag.h"
+#include "video_core/nx2_list_indirect.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/query_cache/frame_trace.h"
@@ -1335,6 +1336,42 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
     }
 }
 
+namespace {
+
+// GPU-written list words the channel's compute macros left in its data RAM (Nx2ListIndirect):
+// the front runs 3D macros on the words themselves, so a macro at `start` that may read one
+// gets them first, read back from their slots.
+void ConcretizeListWords(VideoCommon::GpuSplit& split, VideoCore::RasterizerInterface* rasterizer,
+                         Nx2ListIndirect::DataRamWords& channel, std::span<u32> data_ram,
+                         const MacroEngine& engine, u32 start) {
+    const auto& reads =
+        channel.reads_3d.Get(engine.native_code, engine.native_code_generation, start);
+    if (!Nx2ListIndirect::MayRead(reads.data_ram_known, reads.data_ram, channel.words)) {
+        return;
+    }
+    const auto release = [&](u32 slot) { Nx2ListIndirect::ReleaseSlot(split, rasterizer, slot); };
+    Nx2ListIndirect::Prune(channel.words, [data_ram](u32 word) { return data_ram[word]; }, release);
+    if (!Nx2ListIndirect::MayRead(reads.data_ram_known, reads.data_ram, channel.words)) {
+        return;
+    }
+    static const bool stats = std::getenv("EDEN_NX2_LIST_WAIT_STATS") != nullptr;
+    if (stats) {
+        static u64 count{};
+        if ((++count & 255) == 1) {
+            LOG_INFO(HW_GPU, "List indirect: 3D macro at {:#x} reads list words ({} so far)", start,
+                     count);
+        }
+    }
+    Nx2ListIndirect::ConcretizeDataRam(
+        channel.words, data_ram,
+        [&](std::span<const u32> slots, std::span<u32> words) {
+            Nx2ListIndirect::ReadSlots(split, rasterizer, slots, words);
+        },
+        release);
+}
+
+} // Anonymous namespace
+
 void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split,
                               FrontState& fs) {
     const u32 method = fs.executing_macro;
@@ -1345,6 +1382,10 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
     VideoCommon::Nx2Profile::CountMethod(method, false);
     {
         VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Macro};
+        if (auto* channel = Nx2ListIndirect::FindChannel(&native_data_ram);
+            channel != nullptr && !channel->words.empty()) {
+            ConcretizeListWords(split, rasterizer, *channel, native_data_ram, engine, start);
+        }
         engine.native_interpreter.active_dram = &native_data_ram;
         const auto parameter_count = fs.parameters.size();
         const auto read = [&fs](u32 address) {

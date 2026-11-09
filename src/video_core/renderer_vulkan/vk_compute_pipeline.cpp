@@ -483,9 +483,12 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     }
     if (shadow_index) {
         const auto max_dim{device.GetMaxComputeWorkGroupCount()};
-        if (qmd.grid_dim_x == 0 || qmd.grid_dim_y == 0 || qmd.grid_dim_z == 0 ||
-            qmd.grid_dim_x > max_dim[0] || qmd.grid_dim_y > max_dim[1] ||
-            qmd.grid_dim_z > max_dim[2]) {
+        // A grid of GPU-written list words (Nx2ListIndirect) is only on the host GPU: its slot
+        // never exceeds the limits (Nx2ListSlots), and an empty one dispatches no groups.
+        if (!kepler_compute.GetIndirectListSlot() &&
+            (qmd.grid_dim_x == 0 || qmd.grid_dim_y == 0 || qmd.grid_dim_z == 0 ||
+             qmd.grid_dim_x > max_dim[0] || qmd.grid_dim_y > max_dim[1] ||
+             qmd.grid_dim_z > max_dim[2])) {
             throw Shader::RuntimeError("Invalid packed R16 surface dispatch dimensions");
         }
         const auto& target_view{texture_cache.GetImageView(views[*shadow_index].id)};

@@ -141,6 +141,7 @@ void GpuSplit::Stop() {
     write_position = 0;
     last_writer_position = 0;
     last_sync_position = 0;
+    last_mapping_change = 0;
     published_local = 0;
     consumed_cache = 0;
     publish_every = PublishEvery;

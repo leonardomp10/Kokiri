@@ -30,6 +30,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_cmdpage_diag.h"
+#include "video_core/nx2_list_indirect.h"
 #include "video_core/rasterizer_interface.h"
 
 namespace Tegra {
@@ -263,6 +264,12 @@ bool DmaPusher::Step() {
             RecordParsedEntry(header, commands);
             Nx2CmdPageDiag::CountEntry(Nx2CmdPageDiag::Path::Submitted);
             command_resume_offset += ProcessCommands(commands, 0);
+        } else if (gpu_written && !use_safe && TakeGpuWrittenListWords(header)) {
+            // The words stay on the host GPU: the call takes their placeholders (Nx2ListIndirect).
+            const std::span<const CommandHeader> commands{command_headers.data(), header.size};
+            Nx2CmdPageDiag::CountEntry(Nx2CmdPageDiag::Path::Copy);
+            command_resume_offset +=
+                ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
         } else if ((!use_safe || (accurate_list_copy && gpu_written)) &&
                    ReadGpuWrittenCommands(dma_state.dma_get, static_cast<u32>(header.size))) {
             const std::span<const CommandHeader> commands{command_headers.data(), header.size};
@@ -667,6 +674,56 @@ bool DmaPusher::IsGpuWrittenCommands(GPUVAddr address, size_t size) {
         }
     }
     return false;
+}
+
+bool DmaPusher::TakeGpuWrittenListWords(const CommandListHeader& header) {
+    // Ocarina of Time's compute culling writes the group counts of a later dispatch as the
+    // parameters of compute macro 0xe74, which only stores them in the data RAM for 0xe7a and
+    // 0xe76 to upload and launch with. The front need not wait for the culling to run and its
+    // copy to come back: the macros run on placeholders the host GPU's copy of the words takes
+    // the place of (Nx2ListIndirect, KeplerCompute::FrontTakeListWords; ported from Lichii #805).
+    auto& split = VideoCommon::GpuSplit::Get();
+    if (!Nx2ListIndirect::g_enabled || rasterizer == nullptr || command_resume_offset != 0 ||
+        !split.Active() || !split.FrontMacros()) {
+        return false;
+    }
+    const u32 count = static_cast<u32>(header.size);
+    // All of a macro call's parameters, from its first: its header ended the entry before.
+    if (count == 0 || count > Nx2ListIndirect::SlotWords || dma_state.method_count != count ||
+        dma_state.method < MacroRegistersStart || (dma_state.method & 1) != 0 ||
+        dma_state.subchannel >= max_subchannels || subchannels[dma_state.subchannel] == nullptr ||
+        subchannel_type[dma_state.subchannel] != Engines::EngineTypes::KeplerCompute) {
+        return false;
+    }
+    auto* const compute = static_cast<Engines::KeplerCompute*>(subchannels[dma_state.subchannel]);
+    if (!compute->FrontRunsMacros() || !rasterizer->Nx2ListSlotsSupported()) {
+        return false;
+    }
+    // On one device page, as the back finds it: its mappings are the front's once it ran the
+    // last change sent.
+    const u64 bytes = u64{count} * sizeof(u32);
+    const auto device = memory_manager.GpuToCpuAddress(dma_state.dma_get);
+    const auto last = memory_manager.GpuToCpuAddress(dma_state.dma_get + bytes - 1);
+    if (!device || !last || *last != *device + bytes - 1 || !split.Ran(split.LastMappingChange())) {
+        return false;
+    }
+    const std::optional<u32> slot = rasterizer->Nx2AcquireListSlot();
+    if (!slot) {
+        return false;
+    }
+    if (!compute->FrontTakeListWords(split, dma_state.method, count, *slot)) {
+        rasterizer->Nx2ReleaseListSlot(*slot); // Nothing sent with it
+        return false;
+    }
+    // At the list's place: after the work sent before it, the GPU fetched the list there.
+    split.Defer([rasterizer_ = rasterizer, device_ = *device, count, slot_ = *slot] {
+        rasterizer_->Nx2SnapshotListWords(device_, count, slot_);
+    });
+    command_headers.resize_destructive(count);
+    for (u32 k = 0; k < count; ++k) {
+        command_headers[k].argument = Nx2ListIndirect::Placeholder(*slot, k);
+    }
+    return true;
 }
 
 bool DmaPusher::ReadGpuWrittenCommands(GPUVAddr address, u32 count) {
