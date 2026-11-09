@@ -31,6 +31,7 @@
 #include "video_core/nx2.h"
 #include "video_core/nx2_cmdpage_diag.h"
 #include "video_core/nx2_list_indirect.h"
+#include "video_core/nx2_fault_diag.h"
 #include "video_core/rasterizer_interface.h"
 
 namespace Tegra {
@@ -165,6 +166,14 @@ bool DmaPusher::Step() {
         }
         bool gpu_written = IsGpuWrittenCommands(dma_state.dma_get,
                                                  size_t{header.size} * sizeof(u32));
+        if (VideoCommon::Nx2FaultDiag::Enabled()) [[unlikely]] {
+            const u64 bytes = u64{header.size} * sizeof(u32);
+            const auto first = memory_manager.GpuToCpuAddress(dma_state.dma_get);
+            const auto last = memory_manager.GpuToCpuAddress(dma_state.dma_get + bytes - 1);
+            if (first && last && *last == *first + bytes - 1) {
+                VideoCommon::Nx2FaultDiag::NotePushbuffer(*first, bytes);
+            }
+        }
         if (subchannels[dma_state.subchannel] && dma_state.method_count) {
             const auto engine = subchannel_type[dma_state.subchannel];
             const bool kepler_payload = engine == Engines::EngineTypes::KeplerCompute && dma_state.method == ComputeInline && dma_state.non_incrementing;

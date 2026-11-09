@@ -1854,9 +1854,19 @@ bool RasterizerVulkan::TryCacheInvalidation(DAddr addr, u64 size) {
         // GPU thread may do: leave those pages to the fallback.
         const DAddr page_begin = Common::AlignDown(addr, Core::DEVICE_PAGESIZE);
         const DAddr page_end = Common::AlignUp(addr + size, Core::DEVICE_PAGESIZE);
-        if (buffer_cache.IsRegionGpuModified(page_begin, page_end - page_begin)) return false;
-        texture_cache.WriteMemory(addr, size);
-        buffer_cache.WriteMemory(addr, size);
+        if (buffer_cache.IsRegionGpuModified(page_begin, page_end - page_begin)) {
+            // Compute shaders bind storage buffers megabytes wide, and the whole binding counts
+            // as GPU-written: in Ocarina of Time ~3% of the bytes such a fault downloaded differed
+            // from guest memory, each after a full host GPU wait (~55 a second). Merge instead:
+            // the page's next upload sends only the bytes the CPU changes.
+            if (!buffer_cache.Nx2MergeWriteFault(page_begin, page_end - page_begin)) {
+                return false;
+            }
+            texture_cache.WriteMemory(addr, size);
+        } else {
+            texture_cache.WriteMemory(addr, size);
+            buffer_cache.WriteMemory(addr, size);
+        }
     }
     pipeline_cache.InvalidateRegion(addr, size);
     return true;

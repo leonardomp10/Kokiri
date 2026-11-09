@@ -7,7 +7,9 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <chrono>
 #include <cstdlib>
+#include <utility>
 #include <span>
 #include <vector>
 
@@ -135,9 +137,31 @@ Buffer::Buffer(BufferCacheRuntime& runtime, DAddr cpu_addr_, u64 size_bytes_,
     }
 }
 
+namespace {
+/// The usage marks hold only the current submission's uses, and an upload no work recorded in it
+/// used goes ahead of its work, behind a barrier on earlier submissions the host GPU may still
+/// run (the idea of Lichii #805 ddf01f58). EDEN_NX2_UPLOAD_ORDER=0: marks are cleared only once
+/// a buffer's last use finished (TickFrame), as before.
+bool PerSubmissionUsage() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_UPLOAD_ORDER");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+} // Anonymous namespace
+
 void Buffer::MarkUsage(u64 offset, u64 size) noexcept {
+    const u64 tick = scheduler->CurrentTick();
+    if (tick != last_usage_tick && PerSubmissionUsage()) {
+        // The marks so far are earlier submissions'.
+        if (last_usage_tick != 0) {
+            prior_usage_tick = last_usage_tick;
+        }
+        tracker.Reset();
+    }
     tracker.Track(offset, size);
-    last_usage_tick = scheduler->CurrentTick();
+    last_usage_tick = tick;
 }
 
 VkBufferView Buffer::View(u32 offset, u32 size, VideoCore::Surface::PixelFormat format) {
@@ -506,16 +530,35 @@ void BufferCacheRuntime::FinishForHostRead(std::source_location location) {
     scheduler.Finish({}, {}, location);
 }
 
-bool BufferCacheRuntime::CanReorderUpload(const Buffer& buffer,
+bool BufferCacheRuntime::CanReorderUpload(Buffer& buffer,
                                           std::span<const VideoCommon::BufferCopy> copies) {
+    reorder_prior_barrier = false;
+    upload_decided = true;
     if (Settings::values.disable_buffer_reorder) {
         return false;
     }
-    const bool can_use_upload_cmdbuf =
-        std::ranges::all_of(copies, [&](const VideoCommon::BufferCopy& copy) {
+    if (!PerSubmissionUsage()) {
+        return std::ranges::all_of(copies, [&](const VideoCommon::BufferCopy& copy) {
             return !buffer.IsRegionUsed(copy.dst_offset, copy.size);
         });
-    return can_use_upload_cmdbuf;
+    }
+    const u64 tick = scheduler.CurrentTick();
+    // Marks from an earlier submission only: no work recorded in this one used the buffer.
+    const bool stale = buffer.LastUsageTick() != tick;
+    const bool reorder =
+        stale || std::ranges::all_of(copies, [&](const VideoCommon::BufferCopy& copy) {
+            return !buffer.IsRegionUsed(copy.dst_offset, copy.size);
+        });
+    if (reorder) {
+        const u64 prior = stale ? buffer.LastUsageTick() : buffer.PriorUsageTick();
+        reorder_prior_barrier = prior != 0 && !scheduler.IsFree(prior);
+    }
+    // The upload is a use either way: a later upload of these bytes in this submission stays in
+    // order behind it (two copies of the same bytes in the upload command buffer would race).
+    for (const VideoCommon::BufferCopy& copy : copies) {
+        buffer.MarkUsage(copy.dst_offset, copy.size);
+    }
+    return reorder;
 }
 
 void BufferCacheRuntime::CopyBuffer(VkBuffer dst_buffer, VkBuffer src_buffer,
@@ -540,9 +583,53 @@ void BufferCacheRuntime::CopyBuffer(VkBuffer dst_buffer, VkBuffer src_buffer,
     // Measuring a popular game, this number never exceeds the specified size once data is warmed up
     boost::container::small_vector<VkBufferCopy, 8> vk_copies(copies.size());
     std::ranges::transform(copies, vk_copies.begin(), MakeBufferCopy);
+    const bool wants_prior_barrier = std::exchange(reorder_prior_barrier, false);
+    // EDEN_NX2_UPLOAD_STATS=1: where copies go, every 10 s (uploads ahead or in order, and why).
+    if (static const bool stats = std::getenv("EDEN_NX2_UPLOAD_STATS") != nullptr; stats) {
+        static u64 ahead{}, used{}, not_stream{}, other{}, prior{};
+        static auto window = std::chrono::steady_clock::now();
+        const bool decided = std::exchange(upload_decided, false);
+        if (!decided) {
+            ++other;
+        } else if (!can_reorder_upload) {
+            ++used;
+        } else if (src_buffer != staging_pool.StreamBuf()) {
+            ++not_stream;
+        } else {
+            ++ahead;
+            prior += wants_prior_barrier ? 1 : 0;
+        }
+        if (const auto now = std::chrono::steady_clock::now(); now - window >= std::chrono::seconds{10}) {
+            LOG_INFO(Render_Vulkan,
+                     "Upload stats (10 s): ahead {} ({} behind the prior barrier), in order: used "
+                     "in this submission {}, not from the stream buffer {}; other copies {}",
+                     ahead, prior, used, not_stream, other);
+            ahead = used = not_stream = other = prior = 0;
+            window = now;
+        }
+    } else {
+        upload_decided = false;
+    }
     if (src_buffer == staging_pool.StreamBuf() && can_reorder_upload) {
-        scheduler.RecordWithUploadBuffer([src_buffer, dst_buffer, vk_copies](
+        // Earlier submissions may still use these bytes: the upload command buffer (which runs
+        // before this submission's main one) waits for all work submitted before it, once.
+        const u64 tick = scheduler.CurrentTick();
+        const bool prior_barrier = wants_prior_barrier && prior_barrier_tick != tick;
+        if (prior_barrier) {
+            prior_barrier_tick = tick;
+        }
+        scheduler.RecordWithUploadBuffer([src_buffer, dst_buffer, vk_copies, prior_barrier](
                                              vk::CommandBuffer, vk::CommandBuffer upload_cmdbuf) {
+            if (prior_barrier) {
+                static constexpr VkMemoryBarrier PRIOR_BARRIER{
+                    .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                    .pNext = nullptr,
+                    .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
+                    .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+                };
+                upload_cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, PRIOR_BARRIER);
+            }
             upload_cmdbuf.CopyBuffer(src_buffer, dst_buffer, vk_copies);
         });
         return;

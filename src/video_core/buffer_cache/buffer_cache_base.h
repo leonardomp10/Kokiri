@@ -316,6 +316,10 @@ public:
     [[nodiscard]] std::pair<Buffer*, u32> ObtainCPUBuffer(DAddr gpu_addr, u32 size,
                                                           ObtainBufferSynchronize sync_info,
                                                           ObtainBufferOperation post_op);
+
+    /// GPU work recorded now reads or writes these bytes, of a buffer obtained before (work set
+    /// up once that keeps reading them, as conditional rendering does). Creates no buffer.
+    void MarkUsed(DAddr device_addr, u64 size);
     void FlushCachedWrites();
 
     /// Return true when there are uncommitted buffers to be downloaded
@@ -358,6 +362,12 @@ public:
     Nx2ListRead Nx2ReadListCopy(DAddr device_addr, std::span<u8> out, bool past_sync);
     /// Front thread, the split drained: the command list page was flushed to guest memory.
     void Nx2NoteListSynced(DAddr page);
+    /// A guest CPU write fault on GPU-written pages [page_begin, +size) (CPU thread, under the
+    /// cache lock): instead of a download after a full host GPU wait, keeps a snapshot of the
+    /// pages and hands them to the CPU. Their next upload sends only the bytes the CPU changed
+    /// from the snapshot; the GPU-written bytes stay the GPU's (EDEN_NX2_MERGE_FAULTS, on).
+    /// False when off: the caller downloads as before.
+    bool Nx2MergeWriteFault(DAddr page_begin, u64 size);
 
     void Nx2FlushListPages(std::span<const DAddr> pages);
     /// CPU and inline writes: they reach guest memory, so a synced page stays synced, but its copy
@@ -534,7 +544,9 @@ private:
 
     void UpdateComputeTextureBuffers();
 
-    void MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u32 size, bool needs_sync = false);
+    /// `site`: which binding path marked it (EDEN_NX2_FAULT_DIAG, nx2_fault_diag.h).
+    void MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u32 size, bool needs_sync = false,
+                           u8 site = 0);
 
     /// Counts a GPU write to the command list pages in the range (invalidating their copies) and,
     /// while collecting, asks for new copies.
@@ -789,6 +801,18 @@ private:
         bool draw_written{};
         std::optional<Nx2Staging> copy;
     };
+    /// Nx2MergeWriteFault's pages: guest memory as it was when the CPU took the page over.
+    std::unordered_map<DAddr, std::unique_ptr<std::array<u8, Core::DEVICE_PAGESIZE>>>
+        nx2_merge_pages;
+    /// The bytes of merged page `page` the CPU changed are its own from now on (no longer
+    /// GPU-written); `drop`: forget the snapshot (the page is uploaded now).
+    void Nx2MergeDiffPage(DAddr page, bool drop);
+    /// PopAsyncBuffers: writes downloaded GPU bytes [start, end) into guest memory, on merged
+    /// pages only where the CPU has not written since their snapshot.
+    void Nx2LandMerged(DAddr start, DAddr end, const u8* data);
+    /// Nx2MergeDiffPage for the merged pages in [device_addr, +size).
+    void Nx2MergeDiffRange(DAddr device_addr, u64 size, bool drop);
+    boost::container::small_vector<std::pair<DAddr, u64>, 16> nx2_upload_ranges;
     std::mutex nx2_list_mutex; ///< nx2_list_pages: the split's front reads the copies
     std::unordered_map<DAddr, Nx2ListPage> nx2_list_pages;
     /// Copies replaced while the GPU may still write them: freed once it is past their tick.

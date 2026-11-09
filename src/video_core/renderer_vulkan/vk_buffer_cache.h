@@ -71,6 +71,11 @@ public:
         return last_usage_tick;
     }
 
+    /// The newest submission before LastUsageTick() that used the buffer (0: none known).
+    [[nodiscard]] u64 PriorUsageTick() const noexcept {
+        return prior_usage_tick;
+    }
+
     [[nodiscard]] std::span<const u8> Mapped() const noexcept {
         return buffer.IsHostCoherent() ? buffer.Mapped() : std::span<const u8>{};
     }
@@ -94,6 +99,7 @@ private:
     VideoCommon::UsageTracker tracker;
     VkDeviceAddress device_address{};
     u64 last_usage_tick{};
+    u64 prior_usage_tick{};
     bool is_null{};
     bool sparse_compatible{};
 };
@@ -150,7 +156,9 @@ public:
 
     [[nodiscard]] StagingBufferRef DownloadStagingBuffer(size_t size, bool deferred = false);
 
-    bool CanReorderUpload(const Buffer& buffer, std::span<const VideoCommon::BufferCopy> copies);
+    /// Whether an upload of `copies` into `buffer` may run in the upload command buffer, ahead of
+    /// the work of the current submission. Marks the bytes it writes as used either way.
+    bool CanReorderUpload(Buffer& buffer, std::span<const VideoCommon::BufferCopy> copies);
 
     void FreeDeferredStagingBuffer(StagingBufferRef& ref);
 
@@ -338,6 +346,12 @@ private:
     VkDeviceSize multi_range_total{};
 
     StreamUniformRef last_stream_uniform{};
+
+    /// CanReorderUpload decided an upload ahead of work of an earlier submission the host GPU
+    /// may still run: the upload command buffer needs a barrier on it (once a submission).
+    bool reorder_prior_barrier{};
+    bool upload_decided{}; ///< CanReorderUpload ran for the next CopyBuffer (EDEN_NX2_UPLOAD_STATS)
+    u64 prior_barrier_tick{};
 
     bool limit_dynamic_storage_buffers = false;
     u32 max_dynamic_storage_buffers = (std::numeric_limits<u32>::max)();

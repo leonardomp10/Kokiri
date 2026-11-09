@@ -32,6 +32,7 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/engines/maxwell_dma.h"
 #include "video_core/gpu.h"
+#include "video_core/nx2_fault_diag.h"
 #include "video_core/pending_maps.h"
 #include "video_core/gpu_thread.h"
 #include "video_core/gpu_timestamp.h"
@@ -257,7 +258,20 @@ struct GPU::Impl {
                     // As a read's flush does: marks the pages Preflushable where the buffer cache
                     // copies them back at fences, so the next fault here need not wait.
                     (void)rasterizer->GetFlushArea(addr, size);
+                    const bool diag = VideoCommon::Nx2FaultDiag::Enabled();
+                    const auto start = diag ? std::chrono::steady_clock::now()
+                                            : std::chrono::steady_clock::time_point{};
+                    VideoCommon::Nx2FaultDiag::t_in_fault = diag;
+                    VideoCommon::Nx2FaultDiag::t_fault_bytes = 0;
                     rasterizer->FlushRegion(addr, size, VideoCommon::CacheType::BufferCache);
+                    VideoCommon::Nx2FaultDiag::t_in_fault = false;
+                    if (diag) {
+                        VideoCommon::Nx2FaultDiag::NoteFault(
+                            static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                 std::chrono::steady_clock::now() - start)
+                                                 .count()),
+                            VideoCommon::Nx2FaultDiag::t_fault_bytes);
+                    }
                     rasterizer->OnCacheInvalidation(addr, size);
                 });
                 gpu_thread.TickGPU(is_async);

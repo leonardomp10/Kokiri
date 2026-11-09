@@ -116,6 +116,7 @@ add_library(video_core STATIC
     nx2_cmdpage_diag.h
     nx2_debug_control.cpp
     nx2_debug_control.h
+    nx2_fault_diag.h
     nx2_list_indirect.h
     nx2_profile.h
     nx2_perf.h

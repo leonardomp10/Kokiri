@@ -7,13 +7,15 @@
 #pragma once
 
 #include "video_core/buffer_cache/uniform_cache_history.h"
+#include "video_core/nx2_fault_diag.h"
 
 #include <algorithm>
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(__linux__)
 #include <dlfcn.h>
 #include <unwind.h>
 #endif
 #include <atomic>
+#include <cstring>
 #include <memory>
 #include <numeric>
 #include <stdexcept>
@@ -568,6 +570,22 @@ std::pair<typename P::Buffer*, u32> BufferCache<P>::ObtainBuffer(GPUVAddr gpu_ad
 }
 
 template <class P>
+void BufferCache<P>::MarkUsed(DAddr device_addr, u64 size) {
+    const u64 page = device_addr >> CACHING_PAGEBITS;
+    if (device_addr == 0 || size == 0 || page >= page_table.size()) {
+        return;
+    }
+    const BufferId buffer_id = page_table[page];
+    if (!buffer_id) {
+        return;
+    }
+    Buffer& buffer = slot_buffers[buffer_id];
+    if (buffer.IsInBounds(device_addr, size)) {
+        buffer.MarkUsage(buffer.Offset(device_addr), size);
+    }
+}
+
+template <class P>
 std::pair<typename P::Buffer*, u32> BufferCache<P>::ObtainCPUBuffer(
     DAddr device_addr, u32 size, ObtainBufferSynchronize sync_info, ObtainBufferOperation post_op) {
     const BufferId buffer_id = FindBuffer(device_addr, size, false);
@@ -582,10 +600,13 @@ std::pair<typename P::Buffer*, u32> BufferCache<P>::ObtainCPUBuffer(
         break;
     }
 
+    // Each caller records GPU work that reads or writes these bytes now (indirect dispatches, DMA
+    // copies between images and buffers, query results, conditional rendering, list slots): an
+    // upload of them later in this submission must run after it (port of Lichii #805 90e33429).
+    buffer.MarkUsage(buffer.Offset(device_addr), size);
     switch (post_op) {
     case ObtainBufferOperation::MarkAsWritten:
-        MarkWrittenBuffer(buffer_id, device_addr, size);
-        buffer.MarkUsage(buffer.Offset(device_addr), size);
+        MarkWrittenBuffer(buffer_id, device_addr, size, false, 1);
         break;
     case ObtainBufferOperation::DiscardWrite: {
         ClearDownload(device_addr, size);
@@ -1072,8 +1093,12 @@ void BufferCache<P>::PopAsyncBuffers() {
         // Only what no write replaced since the copy was taken: the rest is older than guest
         // memory (CPU writes) or than the GPU's copy (GPU writes, still to be downloaded).
         ranges.ForEachInRange(device_addr, copy.size, [&](DAddr start, DAddr end) {
-            device_memory.WriteBlockUnsafe(start, &read_mapped_memory[start - device_addr],
-                                           end - start);
+            if (!nx2_merge_pages.empty()) [[unlikely]] {
+                Nx2LandMerged(start, end, &read_mapped_memory[start - device_addr]);
+            } else {
+                device_memory.WriteBlockUnsafe(start, &read_mapped_memory[start - device_addr],
+                                               end - start);
+            }
             gpu_modified_ranges.Subtract(start, end - start);
         });
     }
@@ -1338,6 +1363,10 @@ void BufferCache<P>::BindHostDrawIndirectBuffers() {
         Buffer& buffer = slot_buffers[binding.buffer_id];
         TouchBuffer(buffer, binding.buffer_id);
         SynchronizeBuffer(buffer, binding.device_addr, binding.size);
+        // The draw reads the arguments (GetDrawIndirectBuffer, GetDrawIndirectCount).
+        if (binding.buffer_id != NULL_BUFFER_ID) {
+            buffer.MarkUsage(buffer.Offset(binding.device_addr), binding.size);
+        }
     };
     if (current_draw_indirect->include_count) {
         bind_buffer(channel_state->count_buffer_binding);
@@ -1577,7 +1606,7 @@ bool BufferCache<P>::BindMultiRangeStorage(const Binding& binding, bool is_writt
             const u32 offset = buffer.Offset(segment.device_addr);
             buffer.MarkUsage(offset, segment.size);
             if (is_written) {
-                MarkWrittenBuffer(segment.buffer_id, segment.device_addr, segment.size);
+                MarkWrittenBuffer(segment.buffer_id, segment.device_addr, segment.size, false, 2);
             }
             runtime.PushMultiRangeSource(buffer, offset, segment.size);
         }
@@ -1605,7 +1634,7 @@ void BufferCache<P>::BindHostGraphicsStorageBuffers(size_t stage) {
         buffer.MarkUsage(offset, size);
 
         if (is_written) {
-            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size);
+            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size, false, 3);
         }
 
         if constexpr (NEEDS_BIND_STORAGE_INDEX) {
@@ -1627,7 +1656,7 @@ void BufferCache<P>::BindHostGraphicsTextureBuffers(size_t stage) {
 
         const bool is_written = ((channel_state->written_texture_buffers[stage] >> index) & 1) != 0;
         if (is_written) {
-            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size);
+            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size, false, 4);
         }
 
         const u32 offset = buffer.Offset(binding.device_addr);
@@ -1665,7 +1694,7 @@ void BufferCache<P>::BindHostTransformFeedbackBuffers() {
             TouchBuffer(buffer, binding.buffer_id);
             size = binding.size;
             SynchronizeBuffer(buffer, binding.device_addr, size);
-            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size);
+            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size, false, 5);
             offset = buffer.Offset(binding.device_addr);
             buffer.MarkUsage(offset, size);
             host_buffer = &buffer;
@@ -1763,7 +1792,7 @@ void BufferCache<P>::BindHostComputeStorageBuffers() {
         buffer.MarkUsage(offset, size);
 
         if (is_written) {
-            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size, true);
+            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size, true, 6);
         }
 
         if constexpr (NEEDS_BIND_STORAGE_INDEX) {
@@ -1786,7 +1815,7 @@ void BufferCache<P>::BindHostComputeTextureBuffers() {
         const bool is_written =
             ((channel_state->written_compute_texture_buffers >> index) & 1) != 0;
         if (is_written) {
-            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size);
+            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, size, false, 7);
         }
 
         const u32 offset = buffer.Offset(binding.device_addr);
@@ -2065,7 +2094,11 @@ void BufferCache<P>::UpdateComputeTextureBuffers() {
 }
 
 template <class P>
-void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u32 size, bool needs_sync) {
+void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u32 size, bool needs_sync,
+                                       u8 site) {
+    if (Nx2FaultDiag::Enabled()) [[unlikely]] {
+        Nx2FaultDiag::NoteWrite(device_addr, size, site, 0);
+    }
     if constexpr (!IS_OPENGL) {
         if (needs_sync) {
             Buffer& buffer = slot_buffers[buffer_id];
@@ -2578,14 +2611,25 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
             total_size_bytes += range_size;
             largest_copy = (std::max)(largest_copy, range_size);
         };
+        // The ranges first: the tracker protects their pages again once it handed them all out,
+        // so the bytes of merged pages (Nx2MergeWriteFault) the CPU changed are read after it.
+        nx2_upload_ranges.clear();
         for_each_upload_range([&](u64 device_addr_out, u64 range_size) {
+            nx2_upload_ranges.emplace_back(device_addr_out, range_size);
+        });
+        if (!nx2_merge_pages.empty()) [[unlikely]] {
+            for (const auto& [range_addr, range_size] : nx2_upload_ranges) {
+                Nx2MergeDiffRange(range_addr, range_size, true);
+            }
+        }
+        for (const auto& [device_addr_out, range_size] : nx2_upload_ranges) {
             DAddr upload_start = device_addr_out;
             gpu_modified_ranges.ForEachInRange(device_addr_out, range_size, [&](DAddr gpu_start, DAddr gpu_end) {
                 add_upload(upload_start, gpu_start);
                 upload_start = gpu_end;
             });
             add_upload(upload_start, device_addr_out + range_size);
-        });
+        }
         if (total_size_bytes == 0) {
             return true;
         }
@@ -2780,18 +2824,18 @@ void BufferCache<P>::DownloadBuffersMemory(std::span<const BufferId> buffer_ids)
 // EDEN_NX2_DOWNLOAD_STACKS=1 (Android): every 64th download that waits for the host GPU logs
 // its return addresses as offsets into their libraries, for llvm-symbolizer (32 samples).
 inline void Nx2SampleDownloadStack() {
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(__linux__)
     static const bool enabled = std::getenv("EDEN_NX2_DOWNLOAD_STACKS") != nullptr;
     static std::atomic<u32> calls{};
-    if (!enabled || (calls.fetch_add(1, std::memory_order_relaxed) & 63) != 0) {
+    if (!enabled || (calls.fetch_add(1, std::memory_order_relaxed) & 15) != 0) {
         return;
     }
     static std::atomic<u32> samples{};
-    if (samples.fetch_add(1, std::memory_order_relaxed) >= 32) {
+    if (samples.fetch_add(1, std::memory_order_relaxed) >= 400) {
         return;
     }
     struct State {
-        std::array<uintptr_t, 12> pcs{};
+        std::array<uintptr_t, 20> pcs{};
         size_t count{};
     } state;
     _Unwind_Backtrace(
@@ -2816,7 +2860,132 @@ inline void Nx2SampleDownloadStack() {
 }
 
 template <class P>
+bool BufferCache<P>::Nx2MergeWriteFault(DAddr page_begin, u64 size) {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_MERGE_FAULTS");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (!enabled || IS_OPENGL) {
+        return false;
+    }
+    constexpr DAddr page_size = Core::DEVICE_PAGESIZE;
+    for (DAddr page = page_begin; page < page_begin + size; page += page_size) {
+        auto& snapshot = nx2_merge_pages[page];
+        if (!snapshot) {
+            snapshot = std::make_unique<std::array<u8, Core::DEVICE_PAGESIZE>>();
+            device_memory.ReadBlockUnsafe(page, snapshot->data(), page_size);
+        }
+    }
+    // The GPU-written bytes still reach guest memory, where the CPU may read them (Ocarina's
+    // screen is white without: guest code reads what compute shaders write next to its own
+    // writes): downloaded at the next fence, they land before the guest sees it signaled, and
+    // only where the CPU has not written since the snapshot (PopAsyncBuffers).
+    uncommitted_gpu_modified_ranges.Add(page_begin, size);
+    // And so do the GPU's later writes to them, at every fence, as the download a fault made
+    // here before marked them (GetFlushArea: Ocarina of Time preflushes).
+    memory_tracker.MarkRegionAsPreflushable(page_begin, size);
+    Nx2NoteListHostWrite(page_begin, size);
+    memory_tracker.MarkRegionAsCpuModified(page_begin, size);
+    MarkVertexBuffersStale(page_begin, size);
+    static std::atomic<u64> merges{};
+    if (const u64 count = merges.fetch_add(1, std::memory_order_relaxed) + 1; (count & 4095) == 1) {
+        LOG_INFO(HW_GPU, "Nx2 merged write faults: {} (no host GPU wait)", count);
+    }
+    return true;
+}
+
+template <class P>
+void BufferCache<P>::Nx2MergeDiffPage(DAddr page, bool drop) {
+    const auto it = nx2_merge_pages.find(page);
+    if (it == nx2_merge_pages.end()) {
+        return;
+    }
+    constexpr DAddr page_size = Core::DEVICE_PAGESIZE;
+    if (gpu_modified_ranges.Intersects(page, page_size)) {
+        std::array<u8, Core::DEVICE_PAGESIZE> now;
+        device_memory.ReadBlockUnsafe(page, now.data(), page_size);
+        const u8* const before = it->second->data();
+        u64 changed = 0;
+        for (u64 i = 0; i < page_size;) {
+            if (now[i] == before[i]) {
+                ++i;
+                continue;
+            }
+            const u64 first = i;
+            while (i < page_size && now[i] != before[i]) {
+                ++i;
+            }
+            // The CPU's bytes: uploaded with the page, never downloaded over.
+            ClearDownload(page + first, i - first);
+            gpu_modified_ranges.Subtract(page + first, i - first);
+            changed += i - first;
+        }
+        static std::atomic<u64> pages{};
+        static std::atomic<u64> bytes{};
+        bytes.fetch_add(changed, std::memory_order_relaxed);
+        if (const u64 count = pages.fetch_add(1, std::memory_order_relaxed) + 1;
+            (count & 4095) == 1) {
+            LOG_INFO(HW_GPU, "Nx2 merged pages: {} diffed, {} bytes the CPU changed", count,
+                     bytes.load(std::memory_order_relaxed));
+        }
+    }
+    if (drop) {
+        nx2_merge_pages.erase(it);
+    }
+}
+
+template <class P>
+void BufferCache<P>::Nx2LandMerged(DAddr start, DAddr end, const u8* data) {
+    // Downloaded GPU bytes over [start, end): on merged pages (Nx2MergeWriteFault), not over the
+    // bytes the CPU changed since the snapshot.
+    constexpr DAddr page_size = Core::DEVICE_PAGESIZE;
+    for (DAddr piece = start; piece < end;) {
+        const DAddr page = piece & ~(page_size - 1);
+        const DAddr piece_end = (std::min)(end, page + page_size);
+        const u8* const source = data + (piece - start);
+        const auto it = nx2_merge_pages.find(page);
+        if (it == nx2_merge_pages.end()) {
+            device_memory.WriteBlockUnsafe(piece, source, piece_end - piece);
+            piece = piece_end;
+            continue;
+        }
+        std::array<u8, Core::DEVICE_PAGESIZE> now;
+        const u64 offset = piece - page;
+        const u64 length = piece_end - piece;
+        device_memory.ReadBlockUnsafe(piece, now.data(), length);
+        u8* const snapshot = it->second->data() + offset;
+        for (u64 i = 0; i < length;) {
+            if (now[i] != snapshot[i]) {
+                ++i; // The CPU's
+                continue;
+            }
+            const u64 first = i;
+            while (i < length && now[i] == snapshot[i]) {
+                ++i;
+            }
+            device_memory.WriteBlockUnsafe(piece + first, source + first, i - first);
+            // Landed GPU bytes are no change of the CPU's (Nx2MergeDiffPage).
+            std::memcpy(snapshot + first, source + first, i - first);
+        }
+        piece = piece_end;
+    }
+}
+
+template <class P>
+void BufferCache<P>::Nx2MergeDiffRange(DAddr device_addr, u64 size, bool drop) {
+    constexpr DAddr page_size = Core::DEVICE_PAGESIZE;
+    const DAddr end = device_addr + size;
+    for (DAddr page = device_addr & ~(page_size - 1); page < end; page += page_size) {
+        Nx2MergeDiffPage(page, drop);
+    }
+}
+
+template <class P>
 void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64 size) {
+    // Merged pages (Nx2MergeWriteFault): the bytes the CPU changed are not downloaded over.
+    if (!nx2_merge_pages.empty()) [[unlikely]] {
+        Nx2MergeDiffRange(device_addr, size, false);
+    }
     boost::container::small_vector<BufferCopy, 1> copies;
     u64 total_size_bytes = 0;
     u64 largest_copy = 0;
@@ -2845,10 +3014,18 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
     if (total_size_bytes == 0) {
         return;
     }
-
     if constexpr (requires { buffer.Mapped(); }) {
         if (const auto mapped = buffer.Mapped(); !mapped.empty()) {
             runtime.FinishForHostRead();
+            if (Nx2FaultDiag::t_in_fault && Nx2FaultDiag::Enabled()) [[unlikely]] {
+                for (const BufferCopy& copy : copies) {
+                    tmp_buffer.resize_destructive(copy.size);
+                    device_memory.ReadBlockUnsafe(buffer.CpuAddr() + copy.src_offset,
+                                                  tmp_buffer.data(), copy.size);
+                    Nx2FaultDiag::NoteDownload(buffer.CpuAddr() + copy.src_offset, copy.size,
+                                               mapped.data() + copy.src_offset, tmp_buffer.data());
+                }
+            }
             for (const BufferCopy& copy : copies) {
                 device_memory.WriteBlockUnsafe(buffer.CpuAddr() + copy.src_offset,
                                                mapped.data() + copy.src_offset, copy.size);
@@ -2873,6 +3050,12 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
             // Undo the modified offset
             const u64 dst_offset = copy.dst_offset - download_staging.offset;
             const u8* copy_mapped_memory = mapped_memory + dst_offset;
+            if (Nx2FaultDiag::t_in_fault && Nx2FaultDiag::Enabled()) [[unlikely]] {
+                tmp_buffer.resize_destructive(copy.size);
+                device_memory.ReadBlockUnsafe(copy_device_addr, tmp_buffer.data(), copy.size);
+                Nx2FaultDiag::NoteDownload(copy_device_addr, copy.size, copy_mapped_memory,
+                                           tmp_buffer.data());
+            }
             device_memory.WriteBlockUnsafe(copy_device_addr, copy_mapped_memory, copy.size);
         }
     } else {
