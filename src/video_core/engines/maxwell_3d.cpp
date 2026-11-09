@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <unordered_map>
 #include <array>
+#include <chrono>
 #include <atomic>
 #include <cstring>
 #include <limits>
@@ -1490,6 +1491,17 @@ void ConcretizeListWords(VideoCommon::GpuSplit& split, VideoCore::RasterizerInte
 
 void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split,
                               FrontState& fs) {
+    // EDEN_NX2_FRONT_DELAY_NS (experiment): spin this long per front macro call, to measure how
+    // the frame rate follows the front's macro cost (what a faster interpreter or a JIT could win).
+    static const s64 front_delay_ns = [] {
+        const char* value = std::getenv("EDEN_NX2_FRONT_DELAY_NS");
+        return value != nullptr ? std::strtoll(value, nullptr, 10) : 0;
+    }();
+    if (front_delay_ns > 0) [[unlikely]] {
+        const auto until = std::chrono::steady_clock::now() + std::chrono::nanoseconds{front_delay_ns};
+        while (std::chrono::steady_clock::now() < until) {
+        }
+    }
     const u32 method = fs.executing_macro;
     fs.executing_macro = 0;
     auto& engine = GetNativeMacroEngine();
