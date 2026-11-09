@@ -153,8 +153,7 @@ public:
     }
     /// Defer, calling `func` with a copy of `words` (a std::span<const u32>).
     template <typename Func>
-    void DeferWords(const Func& func, std::span<const u32> words,
-                    Writes writes = Writes::Anywhere) {
+    void DeferWords(const Func& func, std::span<const u32> words) {
         static_assert(std::is_trivially_copyable_v<Func> && alignof(Func) <= alignof(u64));
         constexpr size_t function_words = (sizeof(Func) + sizeof(u64) - 1) / sizeof(u64);
         const size_t payload = function_words + 1 + (words.size() + 1) / 2;
@@ -168,9 +167,6 @@ public:
             std::memcpy(entry + 3 + function_words, words.data(), words.size_bytes());
         }
         Commit(2 + payload);
-        if (writes == Writes::Anywhere) {
-            NoteAnyWrite();
-        }
     }
     void DeferFunction(std::function<void()>&& func);
     /// Runs `func` on the back and waits for it: for work on back-owned state, such as a buffer
