@@ -581,8 +581,9 @@ endif()
 
 create_target_directory_groups(video_core)
 
-# GCC 13 at -O3 drops the split front's macro code uploads in maxwell_3d.cpp (every Turing macro
-# then reads empty macro RAM: "uninitialized register read"); -O2 builds it correctly.
+# GCC 13 -O3 loop unswitching drops the split front's macro code uploads in maxwell_3d.cpp
+# (Maxwell3D::FrontCallMultiMethod): every Turing macro then reads empty macro RAM
+# ("uninitialized register read"). Clang builds are not affected.
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    set_source_files_properties(engines/maxwell_3d.cpp PROPERTIES COMPILE_OPTIONS "-O2")
+    set_source_files_properties(engines/maxwell_3d.cpp PROPERTIES COMPILE_OPTIONS "-fno-unswitch-loops")
 endif()
