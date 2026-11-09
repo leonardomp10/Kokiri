@@ -141,6 +141,7 @@ void GpuSplit::Stop() {
     write_position = 0;
     last_writer_position = 0;
     last_sync_position = 0;
+    synced_writer_position = 0;
     last_mapping_change = 0;
     semaphore_writes.clear();
     semaphore_writes_limit = 1024;
@@ -239,8 +240,7 @@ bool GpuSplit::WaitForSync() {
 }
 
 bool GpuSplit::WaitForSyncedWriters() {
-    return WaitFor(std::min({last_writer_position, last_sync_position, write_position}),
-                   DrainSite::ListWriters);
+    return WaitFor(std::min(synced_writer_position, write_position), DrainSite::ListWriters);
 }
 
 void GpuSplit::NoteSemaphoreWrite(u64 device_address, u32 payload, bool known) {

@@ -249,9 +249,14 @@ bool DmaPusher::Step() {
         const bool command_entry = dma_state.method_count == 0;
         const bool waits_for_writers =
             old_entry_wait || !command_entry || CopyWritersPending(VideoCommon::GpuSplit::Get());
-        if (!gpu_written && VideoCommon::GpuSplit::Get().Active() && waits_for_writers &&
-            (old_entry_wait ? VideoCommon::GpuSplit::Get().WaitForWriters()
-                            : VideoCommon::GpuSplit::Get().WaitForSyncedWriters())) {
+        if (!gpu_written && VideoCommon::GpuSplit::Get().Active() && waits_for_writers) {
+            // Check the page again even when nothing was left to wait for: the writers that ran
+            // may have marked it since (Lichii 8d427476).
+            if (old_entry_wait) {
+                VideoCommon::GpuSplit::Get().WaitForWriters();
+            } else {
+                VideoCommon::GpuSplit::Get().WaitForSyncedWriters();
+            }
             gpu_written =
                 IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
         }
