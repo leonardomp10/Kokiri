@@ -6,6 +6,10 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 -->
 
+<p align="center">
+  <img src="dist/branding/kokiri_icon_with_logo.png" alt="Kokiri" width="600">
+</p>
+
 # Kokiri
 
 **Kokiri** is a Nintendo Switch / Switch 2 emulator fork for **ARM64 handhelds with limited memory and older mobile GPUs**: Linux gaming handhelds and similar devices built on Snapdragon SoCs with Adreno GPUs (Mesa Turnip), with 12 GB of RAM or less.
