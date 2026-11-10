@@ -34,6 +34,7 @@
 #include "video_core/texture_cache/util.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/nx2_texture_fill.h"
 #include "video_core/render_trace.h"
 #include "video_core/textures/decoders.h"
 
@@ -1869,7 +1870,9 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
     largest_upload = (std::max<u64>)(largest_upload, image.guest_size_bytes);
     if (!UploadInChunks(image)) {
         auto staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
-        UploadImageContents(image, staging);
+        if (!UploadImageContentsLater(image, staging)) {
+            UploadImageContents(image, staging);
+        }
         runtime.InsertUploadMemoryBarrier();
     }
     // The host GPU has its own copy now and the guest rarely reads this memory again: TickFrame
@@ -2150,6 +2153,53 @@ void TextureCache<P>::UploadLayers(Image& image, std::span<const u32> layers) {
         uploaded_bytes += tail * layers.size();
         ++layer_uploads;
     }
+}
+
+// EDEN_NX2_TEXTURE_FILL (nx2_texture_fill.h): UploadImageContents with the CPU work that writes
+// the staging memory on the TexFill thread. The copies (or the decode) are recorded here, in
+// order; the submit that carries them waits for the fill. Only for an image whose guest bytes are
+// one host run (read in place, no gather) and whose upload the GPU does from the staging memory
+// alone: not converted on the CPU, not linear (read through the page walk), no trimmed levels.
+template <class P>
+template <typename StagingBuffer>
+bool TextureCache<P>::UploadImageContentsLater(Image& image, StagingBuffer& staging) {
+    if (!VideoCommon::TextureFill::Enabled() || image.info.type == ImageType::Linear ||
+        True(image.flags & (ImageFlagBits::Converted | ImageFlagBits::Sparse |
+                            ImageFlagBits::SparseLayers | ImageFlagBits::SparseTiles |
+                            ImageFlagBits::Unbacked)) ||
+        (True(image.flags & ImageFlagBits::AcceleratedUpload) && image.host_level_offset != 0)) {
+        return false;
+    }
+    const size_t guest_size = image.guest_size_bytes;
+    const std::span<u8> output = staging.mapped_span;
+    const u8* const guest =
+        guest_size != 0 ? gpu_memory->GetSpan(image.gpu_addr, guest_size) : nullptr;
+    if (guest == nullptr) {
+        return false;
+    }
+    if (True(image.flags & ImageFlagBits::AcceleratedUpload)) {
+        if (output.size_bytes() < guest_size) {
+            return false;
+        }
+        // ReadBlock's cache flushes stay here, in order; only the copy moves.
+        gpu_memory->FlushRegion(image.gpu_addr, guest_size,
+                                VideoCommon::CacheType::NoTextureCache);
+        VideoCommon::TextureFill::Get().Push(
+            [guest, output, guest_size] { std::memcpy(output.data(), guest, guest_size); });
+        const auto uploads = FullUploadSwizzles(image.info);
+        runtime.AccelerateImageUpload(image, staging, uploads, 0, 0);
+        return true;
+    }
+    const auto copies =
+        UnswizzleImageCopies(*gpu_memory, image.gpu_addr, image.info, guest_size);
+    VideoCommon::TextureFill::Get().Push(
+        [memory = gpu_memory, gpu_addr = image.gpu_addr, info = image.info, guest, guest_size,
+         output] {
+            (void)UnswizzleImage(*memory, gpu_addr, info, std::span<const u8>(guest, guest_size),
+                                 output, nullptr);
+        });
+    image.UploadMemory(staging, copies);
+    return true;
 }
 
 template <class P>

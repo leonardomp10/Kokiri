@@ -119,6 +119,8 @@ add_library(video_core STATIC
     nx2_fault_diag.h
     nx2_list_indirect.h
     nx2_profile.h
+    nx2_texture_fill.cpp
+    nx2_texture_fill.h
     nx2_perf.h
     nx2_download_trace.h
     pending_maps.h

@@ -852,17 +852,22 @@ bool IsValidEntry(const Tegra::MemoryManager& gpu_memory, const TICEntry& config
     return gpu_memory.GpuToCpuAddress(address, guest_size_bytes).has_value();
 }
 
-boost::container::small_vector<BufferImageCopy, 16> UnswizzleImage(
+namespace {
+// UnswizzleImage, or with `copies_only` only the copies it would return (nothing read or written:
+// TextureFill fills the staging buffer later from the same input).
+boost::container::small_vector<BufferImageCopy, 16> UnswizzleImageImpl(
     Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, const ImageInfo& info,
-    std::span<const u8> input, std::span<u8> output, Tegra::Texture::UnswizzleWorker* worker) {
-    const size_t guest_size_bytes = input.size_bytes();
+    std::span<const u8> input, std::span<u8> output, Tegra::Texture::UnswizzleWorker* worker,
+    bool copies_only, size_t guest_size_bytes) {
     const u32 bpp_log2 = BytesPerBlockLog2(info.format);
     const Extent2D tile_size = DefaultBlockSize(info.format);
     const Extent3D size = info.size;
 
     if (info.type == ImageType::Linear) {
-        ASSERT(output.size_bytes() >= guest_size_bytes);
-        gpu_memory.ReadBlockUnsafe(gpu_addr, output.data(), guest_size_bytes);
+        if (!copies_only) {
+            ASSERT(output.size_bytes() >= guest_size_bytes);
+            gpu_memory.ReadBlockUnsafe(gpu_addr, output.data(), guest_size_bytes);
+        }
 
         ASSERT((info.pitch >> bpp_log2) << bpp_log2 == info.pitch);
         return {{
@@ -917,6 +922,11 @@ boost::container::small_vector<BufferImageCopy, 16> UnswizzleImage(
         size_t guest_layer_offset = 0;
 
         for (s32 layer = 0; layer < info.resources.layers; ++layer) {
+            if (copies_only) {
+                guest_layer_offset += layer_stride;
+                host_offset += host_bytes_per_layer;
+                continue;
+            }
             const std::span<u8> dst = output.subspan(host_offset);
             const std::span<const u8> src = input.subspan(guest_offset + guest_layer_offset);
             if (!worker ||
@@ -935,6 +945,21 @@ boost::container::small_vector<BufferImageCopy, 16> UnswizzleImage(
         guest_offset += level_sizes[level];
     }
     return copies;
+}
+} // Anonymous namespace
+
+boost::container::small_vector<BufferImageCopy, 16> UnswizzleImage(
+    Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, const ImageInfo& info,
+    std::span<const u8> input, std::span<u8> output, Tegra::Texture::UnswizzleWorker* worker) {
+    return UnswizzleImageImpl(gpu_memory, gpu_addr, info, input, output, worker, false,
+                              input.size_bytes());
+}
+
+boost::container::small_vector<BufferImageCopy, 16> UnswizzleImageCopies(
+    Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, const ImageInfo& info,
+    size_t guest_size_bytes) {
+    return UnswizzleImageImpl(gpu_memory, gpu_addr, info, {}, {}, nullptr, true,
+                              guest_size_bytes);
 }
 
 namespace {

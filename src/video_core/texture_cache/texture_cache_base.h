@@ -405,6 +405,10 @@ private:
     /// Upload data from guest to an image
     template <typename StagingBuffer>
     void UploadImageContents(Image& image, StagingBuffer& staging_buffer);
+    /// EDEN_NX2_TEXTURE_FILL: the same with the staging fill on the TexFill thread; false when
+    /// the image doesn't qualify (then UploadImageContents does it as before).
+    template <typename StagingBuffer>
+    bool UploadImageContentsLater(Image& image, StagingBuffer& staging_buffer);
 
     /// Create a new image view from a guest descriptor
     [[nodiscard]] ImageViewId CreateImageView(const TICEntry& config);
