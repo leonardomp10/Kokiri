@@ -3204,6 +3204,12 @@ public:
     /// Write multiple values to the register identified by method.
     void CallMultiMethod(Core::System& system, u32 method, const u32* base_start, u32 amount, u32 methods_pending) override;
 
+    /// The split's back runs a draw.begin write (NVN's instance loops write it once per instance,
+    /// ~485,000 a second in Ocarina of Time) as CallMethodFast would, without the calls in
+    /// between. False where CallMethod must decide: the caller then calls it. The method sink must
+    /// be empty. Port of Fritchii 630d001 (EDEN_NX2_FAST_DRAW_BEGIN=0 turns it off).
+    bool TryFastDrawBegin(u32 argument);
+
     /// GpuSplit's back (fast_maxwell3d): CallMethod for each of up to 64 single writes to the
     /// constant buffer data registers, uploaded in one memory write within a device page.
     void CallConstBufferWords(Core::System& system, const u32* methods, const u32* arguments,

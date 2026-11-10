@@ -387,6 +387,15 @@ size_t GpuSplit::Execute(const u64* entry, size_t words) {
                 }
                 return count;
             }
+            static const bool fast_draw_begin = [] {
+                const char* const value = std::getenv("EDEN_NX2_FAST_DRAW_BEGIN");
+                return value == nullptr || value[0] != '0';
+            }();
+            if (fast_draw_begin && method == MAXWELL3D_REG_INDEX(draw.begin) &&
+                (head & (Direct | HasSegment)) == 0 && maxwell3d->method_sink.empty() &&
+                maxwell3d->TryFastDrawBegin(argument)) {
+                return 1;
+            }
             if ((head & Direct) != 0) {
                 maxwell3d->ConsumeSink(*system);
                 maxwell3d->CallMethod(*system, method, argument, true);
