@@ -3107,9 +3107,12 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
 
     // A new render target that the clear binding it overwrites whole (every channel, the whole
     // image) needs no upload from guest memory first: Ocarina of Time creates ~4 such targets a
-    // frame outdoors, and uploading them was ~15% of the GPU back thread.
+    // frame outdoors, and uploading them was ~15% of the GPU back thread. Ocarina of Time only:
+    // Fast Fusion (040041E0212AE000) presents a black screen with it.
+    static constexpr u64 OcarinaOfTime = 0x0400486024DEC000ULL;
     const auto overwritten_by_clear = [&] {
-        if (!clearing_render_targets || !join_copies_to_do.empty() ||
+        if (Settings::GetCurrentProgramID() != OcarinaOfTime || !clearing_render_targets ||
+            !join_copies_to_do.empty() ||
             new_info.type != ImageType::e2D || new_info.resources.levels != 1 ||
             new_info.resources.layers != 1 || new_info.num_samples != 1) {
             return false;

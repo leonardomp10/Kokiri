@@ -423,12 +423,21 @@ void Filter::ParseFilterString(std::string_view filter_view) {
 // it's ran at global static ctor() time... so BE CAREFUL MFER!
 static std::optional<Common::Log::Impl> logging_instance{};
 
+// EDEN_LOG_FILTER (env.txt on Android, which has no other way to set it per run) replaces the
+// log_filter setting, e.g. "*:Info HW.GPU:Debug Render.Vulkan:Debug" for EDEN_NX2_RENDER_TRACE.
+static const char* EnvLogFilter() {
+    const char* value = std::getenv("EDEN_LOG_FILTER");
+    return value != nullptr && value[0] != ' ' ? value : nullptr;
+}
+
 void Initialize() {
     if (logging_instance) {
         LOG_WARNING(Log, "Reinitializing logging backend");
     } else {
         logging_instance.emplace();
-        logging_instance->filter.ParseFilterString(Settings::values.log_filter.GetValue());
+        const char* env_filter = EnvLogFilter();
+        logging_instance->filter.ParseFilterString(
+            env_filter != nullptr ? std::string{env_filter} : Settings::values.log_filter.GetValue());
 #ifndef __OPENORBIS__
         using namespace Common::FS;
         const auto& log_dir = GetEdenPath(EdenPath::LogDir);
@@ -447,8 +456,14 @@ void Stop() {
 }
 
 void SetGlobalFilter(const Filter& filter) {
-    if (logging_instance)
-        logging_instance->filter = filter;
+    if (!logging_instance) {
+        return;
+    }
+    if (const char* env_filter = EnvLogFilter()) {
+        logging_instance->filter.ParseFilterString(env_filter);
+        return;
+    }
+    logging_instance->filter = filter;
 }
 
 void SetColorConsoleBackendEnabled(bool enabled) {

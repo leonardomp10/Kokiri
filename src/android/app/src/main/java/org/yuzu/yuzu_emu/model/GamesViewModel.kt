@@ -43,6 +43,9 @@ class GamesViewModel : ViewModel() {
     val shouldScrollAfterReload: StateFlow<Boolean> get() = _shouldScrollAfterReload
     private val _shouldScrollAfterReload = MutableStateFlow(false)
 
+    val needsAllFilesAccess: StateFlow<Boolean> get() = _needsAllFilesAccess
+    private val _needsAllFilesAccess = MutableStateFlow(false)
+
     private val _folders = MutableStateFlow(mutableListOf<GameDir>())
     val folders = _folders.asStateFlow()
 
@@ -79,6 +82,10 @@ class GamesViewModel : ViewModel() {
 
     fun setShouldScrollAfterReload(shouldScroll: Boolean) {
         _shouldScrollAfterReload.value = shouldScroll
+    }
+
+    fun setNeedsAllFilesAccess(needsAccess: Boolean) {
+        _needsAllFilesAccess.value = needsAccess
     }
 
     fun setSearchFocused(searchFocused: Boolean) {
@@ -124,6 +131,7 @@ class GamesViewModel : ViewModel() {
                     }
 
                     setGames(GameHelper.getGames())
+                    _needsAllFilesAccess.value = GameHelper.looseExeFSNeedAllFilesAccess
                     _shouldScrollAfterReload.value = true
 
                     if (directoriesChanged) {

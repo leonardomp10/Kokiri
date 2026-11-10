@@ -706,8 +706,8 @@ private:
     /// the native MME's DMA reads never touched those pages. Without them a fence costs ~1 us
     /// instead of ~5 and draw setup ~7% less. Titles whose guest side reads GPU-written buffer
     /// data through a path the buffer cache does not see still need them (moceure/eden-nx2-android
-    /// a5c06ea209): Pokemon Pokopia's sky is black without, and on Android each of its writes
-    /// next to that data downloaded a page and waited for the GPU (750 times a second).
+    /// a5c06ea209). Pokemon Pokopia no longer does: the Preflushable marks copy back the ranges
+    /// it reads, and copying everything back ran an 8 GB phone out of memory and slowed it down.
     /// EDEN_NX2_BUFFER_DOWNLOADS=0/1 forces it.
     bool AsyncBufferDownloads() const {
         static const int forced = [] {
@@ -717,11 +717,9 @@ private:
         if (forced >= 0) {
             return forced == 1;
         }
-        static constexpr u64 PokemonPokopia = 0x0400A3A01EE4C000ULL;
         static constexpr u64 Pragmata = 0x0400C76024710000ULL;
-        const u64 program_id = Settings::GetCurrentProgramID();
         return gpu_memory == nullptr || !gpu_memory->UsesNativeTiling() ||
-               program_id == PokemonPokopia || program_id == Pragmata;
+               Settings::GetCurrentProgramID() == Pragmata;
     }
 
     /// Whether a GPU write to this range is copied back at the next fence. Ranges the guest CPU

@@ -32,6 +32,12 @@ object GameHelper {
 
     var cachedGameList = mutableListOf<Game>()
 
+    // Set by getGames: a game folder holds loose ExeFS games that only all files access can list.
+    var looseExeFSNeedAllFilesAccess = false
+        private set
+
+    const val PREF_EXEFS_ACCESS_PROMPT_DISMISSED = "ExeFSAccessPromptDismissed"
+
     private lateinit var preferences: SharedPreferences
 
     fun getGames(): List<Game> {
@@ -60,21 +66,33 @@ object GameHelper {
         val mountedContainerUris = mutableSetOf<String>()
         mountExternalContentDirectories(mountedContainerUris)
 
+        var lookForExeFS = !hasAllFilesAccess() &&
+            !preferences.getBoolean(PREF_EXEFS_ACCESS_PROMPT_DISMISSED, false)
+        looseExeFSNeedAllFilesAccess = false
         val badDirs = mutableListOf<Int>()
         gameDirs.forEachIndexed { index: Int, gameDir: GameDir ->
             val gameDirUri = gameDir.uriString.toUri()
             val isValid = FileUtil.isTreeUriValid(gameDirUri)
             if (isValid) {
                 val scanDepth = if (gameDir.deepScan) 3 else 1
+                val files = FileUtil.listFiles(gameDirUri)
 
                 addGamesRecursive(
                     games,
                     gamesByProgramId,
-                    FileUtil.listFiles(gameDirUri),
+                    files,
                     scanDepth,
                     mountedContainerUris
                 )
                 addLibraryExeFSGames(games, gameDir)
+                if (lookForExeFS && gameDir.type == DirectoryType.GAME) {
+                    val exeFSDepth =
+                        if (gameDir.deepScan) EXEFS_SEARCH_DEPTH + 2 else EXEFS_SEARCH_DEPTH
+                    if (containsExeFSFolder(files, exeFSDepth)) {
+                        looseExeFSNeedAllFilesAccess = true
+                        lookForExeFS = false
+                    }
+                }
             } else {
                 badDirs.add(index)
             }
@@ -345,6 +363,19 @@ object GameHelper {
         return findExeFSGames(folder, maxDepth).distinctBy {
             if (it.programId.isEmpty()) it.title else it.programId
         }
+    }
+
+    // Looks for an exefs folder through content URIs, which need no all files access.
+    private fun containsExeFSFolder(files: Array<MinimalDocumentFile>, depth: Int): Boolean {
+        if (depth <= 0) {
+            return false
+        }
+        val dirs = files.filter { it.isDirectory }
+        return dirs.any { it.filename.equals("exefs", true) } ||
+            dirs.any {
+                it.filename.lowercase() !in exeFSSkippedDirs &&
+                    containsExeFSFolder(FileUtil.listFiles(it.uri), depth - 1)
+            }
     }
 
     private fun collectExeFSMains(dir: File, depth: Int, maxDepth: Int, mains: MutableList<File>) {

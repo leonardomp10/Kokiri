@@ -92,13 +92,15 @@
                             android:text="@string/loading"
                             android:textAlignment="viewStart" />
 
-                        <com.google.android.material.progressindicator.LinearProgressIndicator
+                        <ProgressBar
                             android:id="@+id/loading_progress_indicator"
+                            style="?android:attr/progressBarStyleHorizontal"
                             android:layout_width="192dp"
-                            android:layout_height="wrap_content"
+                            android:layout_height="8dp"
                             android:layout_marginTop="12dp"
                             android:indeterminate="true"
-                            app:trackCornerRadius="8dp" />
+                            android:indeterminateTint="@color/eden_primary"
+                            android:progressDrawable="@drawable/hokkaido_progress" />
 
                     </LinearLayout>
 

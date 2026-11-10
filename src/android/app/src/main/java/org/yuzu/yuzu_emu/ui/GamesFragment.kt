@@ -162,6 +162,29 @@ class GamesFragment : Fragment() {
         }
     }
 
+    // The library lists loose ExeFS games only with all files access: offer it once a game folder
+    // turns out to hold some. The list reloads when the user comes back with it granted.
+    private var awaitingAllFilesAccess = false
+
+    private fun showAllFilesAccessPrompt() {
+        if (GameHelper.hasAllFilesAccess()) {
+            return
+        }
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.exefs_access_title)
+            .setMessage(R.string.exefs_access_description)
+            .setPositiveButton(R.string.exefs_access_allow) { _, _ ->
+                awaitingAllFilesAccess = true
+                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                intent.data = "package:${requireContext().packageName}".toUri()
+                startActivity(intent)
+            }
+            .setNegativeButton(R.string.exefs_access_not_now) { _, _ ->
+                preferences.edit { putBoolean(GameHelper.PREF_EXEFS_ACCESS_PROMPT_DISMISSED, true) }
+            }
+            .show()
+    }
+
     private fun launchExeFSGame(game: Game) {
         findNavController().navigate(HomeNavigationDirections.actionGlobalEmulationActivity(game))
     }
@@ -252,6 +275,11 @@ class GamesFragment : Fragment() {
             resetState = { gamesViewModel.setShouldScrollToTop(false) }
         ) { if (it) scrollToTop() }
 
+        gamesViewModel.needsAllFilesAccess.collect(
+            viewLifecycleOwner,
+            resetState = { gamesViewModel.setNeedsAllFilesAccess(false) }
+        ) { if (it) showAllFilesAccessPrompt() }
+
         gamesViewModel.shouldScrollAfterReload.collect(viewLifecycleOwner) { shouldScroll ->
             if (shouldScroll) {
                 pendingPostReloadListSettle = true
@@ -330,6 +358,10 @@ class GamesFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
+        if (awaitingAllFilesAccess && GameHelper.hasAllFilesAccess()) {
+            awaitingAllFilesAccess = false
+            gamesViewModel.reloadGames(false)
+        }
         if (getCurrentViewType() == GameAdapter.VIEW_TYPE_CAROUSEL) {
             (binding.gridGames as? CarouselRecyclerView)?.setupCarousel(true)
             (binding.gridGames as? CarouselRecyclerView)?.restoreScrollState(gamesViewModel.lastScrollPosition)

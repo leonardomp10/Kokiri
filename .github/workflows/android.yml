@@ -1,4 +1,4 @@
-# Builds the Lichii Android app (arm64 APK) on every push and on demand.
+# Builds the Hokkaido Android app (arm64 APK) on every push and on demand.
 name: android
 
 on:
@@ -78,7 +78,7 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: lichii-android-${{ github.sha }}
+          name: hokkaido-android-${{ github.sha }}
           path: artifacts/*.apk
           if-no-files-found: error
 
@@ -91,7 +91,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: Lichii for Android ${{ env.RELEASE_VERSION }}
+          name: Hokkaido ${{ env.RELEASE_VERSION }}
           prerelease: false
           make_latest: true
           body_path: docs/android/RELEASE_NOTES.md
@@ -102,7 +102,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: android-latest
-          name: Lichii Android test build
+          name: Hokkaido test build
           prerelease: true
           make_latest: false
           body: Automatic test build from ${{ github.sha }}. Experimental.

@@ -2399,7 +2399,8 @@ private:
 
     // The highest buffer resolution mode of the "default" display. Fire Emblem: Fortune's Weave picks
     // its output from it: 1 -> 1280x720, 2 -> 1920x1080, 4 and 8 -> 2560x1440; 0 (the auto stub's
-    // reply), 3 and 5 fall back to 720p. Docked reports 4, handheld 2 (the screen is 1080p);
+    // reply), 3 and 5 fall back to 720p. Docked reports 4, handheld 2 (the screen is 1080p); on
+    // Android docked reports 2 as well, since a phone shows at most 1080p anyway.
     // EDEN_VI2_MAX_RESOLUTION_MODE=<n> overrides.
     void GetBufferMaxResolution(HLERequestContext& ctx) {
         const auto* packet = ctx.CommandBuffer();
@@ -2411,7 +2412,13 @@ private:
             result = Result{ErrorModule::VI, 7};
             if (name == DefaultDisplay) {
                 static const char* forced = std::getenv("EDEN_VI2_MAX_RESOLUTION_MODE");
-                mode = forced ? std::strtoull(forced, nullptr, 0) : Settings::IsDockedMode() ? 4 : 2;
+#ifdef __ANDROID__
+                constexpr u64 DockedMode = 2;
+#else
+                constexpr u64 DockedMode = 4;
+#endif
+                mode = forced ? std::strtoull(forced, nullptr, 0)
+                              : Settings::IsDockedMode() ? DockedMode : 2;
                 result = ResultSuccess;
             }
         }

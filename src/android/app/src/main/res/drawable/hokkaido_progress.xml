@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Loading progress: a melon-orange to rind-green fill revealed as it grows. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:id="@android:id/background">
+        <shape android:shape="rectangle">
+            <corners android:radius="8dp" />
+            <solid android:color="@color/hokkaido_progress_track" />
+        </shape>
+    </item>
+    <item android:id="@android:id/progress">
+        <clip>
+            <shape android:shape="rectangle">
+                <corners android:radius="8dp" />
+                <gradient
+                    android:angle="0"
+                    android:centerColor="@color/hokkaido_progress_middle"
+                    android:endColor="@color/eden_secondary"
+                    android:startColor="@color/eden_primary" />
+            </shape>
+        </clip>
+    </item>
+</layer-list>

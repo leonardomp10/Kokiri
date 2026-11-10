@@ -190,8 +190,8 @@ android {
             isDefault = true
             minSdk = 33
 
-            manifestPlaceholders += mapOf("appNameBase" to "Lichii")
-            resValue("string", "app_name_suffixed", "Lichii")
+            manifestPlaceholders += mapOf("appNameBase" to "Hokkaido")
+            resValue("string", "app_name_suffixed", "Hokkaido")
 
             ndk {
                 abiFilters += listOf("arm64-v8a")
@@ -270,7 +270,7 @@ android {
 
         // apply nightly suffix I/A
         resValue("string", "app_name_suffixed", "$currentName$suffix")
-        resValue("string", "app_name", "Eden$suffix")
+        resValue("string", "app_name", "$currentName$suffix")
     }
 
     sourceSets {

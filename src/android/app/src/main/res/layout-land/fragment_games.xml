@@ -8,6 +8,18 @@
     android:clipChildren="false"
     >
 
+    <!-- A faint melon net behind the header, fading out over the game list. -->
+    <ImageView
+        android:id="@+id/header_net"
+        android:layout_width="0dp"
+        android:layout_height="200dp"
+        android:importantForAccessibility="no"
+        android:scaleType="centerCrop"
+        android:src="@drawable/hokkaido_header_net"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
     <LinearLayout
         android:id="@+id/header"
         android:layout_width="match_parent"
@@ -17,13 +29,13 @@
         app:layout_constraintTop_toTopOf="parent"
         >
 
-        <com.google.android.material.textview.MaterialTextView
+        <org.yuzu.yuzu_emu.views.HokkaidoTitleView
             android:id="@+id/title"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="@string/app_name"
             style="@style/SynthwaveText.Title"
-            android:textSize="27sp"
+            android:textSize="25sp"
             android:textStyle="bold"
             />
 

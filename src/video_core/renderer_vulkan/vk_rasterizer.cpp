@@ -2703,7 +2703,29 @@ void RasterizerVulkan::TraceRenderState(bool is_indexed, const char* outcome,
                       binding, stream.Address(), regs.vertex_stream_limits[binding].Address(),
                       stream.stride.Value(), stream.frequency,
                       buffer_cache_runtime.IsVertexRepacked(static_cast<u32>(binding)));
+            // Small draws (full-screen quads): the first vertices as the guest memory holds them.
+            const u32 stride = stream.stride.Value();
+            if (draw.vertex_buffer.count <= 6 && stride != 0 && stride <= 64) {
+                std::array<u32, 48> words{};
+                const size_t bytes =
+                    (std::min)(sizeof(words), size_t{stride} * draw.vertex_buffer.count);
+                gpu_memory->ReadBlockUnsafe(stream.Address(), words.data(), bytes);
+                LOG_DEBUG(Render_Vulkan, "Render trace vertex data: binding={} words={:08x}",
+                          binding, fmt::join(words.begin(), words.begin() + bytes / 4, " "));
+            }
         }
+    }
+    for (size_t index = 0; index < regs.vertex_attrib_format.size(); ++index) {
+        const auto& attrib = regs.vertex_attrib_format[index];
+        if (attrib.hex == 0) {
+            continue;
+        }
+        LOG_DEBUG(Render_Vulkan,
+                  "Render trace attribute: index={} buffer={} constant={} offset={} size={:#x} "
+                  "type={} bgra={}",
+                  index, attrib.buffer.Value(), attrib.constant.Value(), attrib.offset.Value(),
+                  static_cast<u32>(attrib.size.Value()), static_cast<u32>(attrib.type.Value()),
+                  attrib.bgra.Value());
     }
     if (is_indexed) {
         LOG_DEBUG(Render_Vulkan, "Render trace index: address={:#x} limit={:#x} format={} first={}",
