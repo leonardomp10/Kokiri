@@ -568,8 +568,7 @@ bool IsStoreOnlyExecutable(u32 method) {
 // executable methods go straight to their handler.
 bool Maxwell3D::TryFastDrawBegin(u32 argument) {
     // The conditions under which CallMethod reaches CallMethodFast for this method.
-    if (draw_manager.pending_vertex_arguments || !fast_maxwell3d || executing_macro != 0 ||
-        VideoCommon::Nx2Perf::Verify()) {
+    if (!fast_maxwell3d || executing_macro != 0 || perf_verify) {
         return false;
     }
     constexpr u32 method = MAXWELL3D_REG_INDEX(draw.begin);
