@@ -508,6 +508,18 @@ bool IsStoreOnlyExecutable(u32 method) {
 // CallMethodSlow without the checks that cannot apply (CallMethod): no macro collects parameters,
 // no write history, trace or profile, not a macro call or SET_SHADOW_RAM_CONTROL. The hot
 // executable methods go straight to their handler.
+bool Maxwell3D::TryFastDrawBegin(u32 argument) {
+    // The conditions under which CallMethod reaches CallMethodFast for this method.
+    if (draw_manager.pending_vertex_arguments || !fast_maxwell3d || executing_macro != 0 ||
+        VideoCommon::Nx2Perf::Verify()) {
+        return false;
+    }
+    constexpr u32 method = MAXWELL3D_REG_INDEX(draw.begin);
+    ProcessDirtyRegisters(method, ProcessShadowRam(method, argument));
+    draw_manager.DrawBegin(*this);
+    return true;
+}
+
 void Maxwell3D::CallMethodFast(u32 method, u32 method_argument, bool is_last_call) {
     const u32 argument = ProcessShadowRam(method, method_argument);
     if (!execution_mask[method]) {
