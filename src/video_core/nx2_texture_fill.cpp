@@ -60,10 +60,8 @@ void TextureFill::WaitDone(u64 sequence) {
 
 void TextureFill::Run(std::stop_token stop_token) {
     Common::SetCurrentThreadName("TexFill");
-    // Off the cores the GPU threads are pinned to (Linux pinning), like the background builds.
-    if (const u64 mask = Common::BackgroundWorkCpuMask(); mask != 0) {
-        Common::SetCurrentThreadCpuMask(mask);
-    }
+    // Off the fastest cores, which the split's back thread is pinned to (Kokiri pinning).
+    Common::PinCurrentThreadForRole(Common::KokiriThreadRole::Helper);
     for (;;) {
         std::function<void()> job;
         {

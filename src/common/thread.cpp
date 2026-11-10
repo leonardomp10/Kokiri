@@ -827,7 +827,10 @@ void PinCurrentThreadForRole([[maybe_unused]] KokiriThreadRole role) {
     for (size_t cpu = 0; cpu < max_freq.size(); ++cpu) {
         const bool fastest = max_freq[cpu] == *highest;
         const bool slowest = max_freq[cpu] == *lowest;
-        if (role == KokiriThreadRole::Back ? fastest : !slowest) {
+        const bool wanted = role == KokiriThreadRole::Back     ? fastest
+                            : role == KokiriThreadRole::Helper ? !fastest
+                                                               : !slowest;
+        if (wanted) {
             CPU_SET(cpu, &set);
         }
     }
