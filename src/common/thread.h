@@ -112,7 +112,7 @@ void SetCurrentThreadToPerformanceCores();
 /// Kokiri: the split GPU threads' cores on Linux ARM handhelds with mixed cores (AYN Thor). The
 /// back thread gets the fastest cores (highest cpuinfo_max_freq), the front and the Vulkan worker
 /// every core but the slowest cluster. EDEN_NX2_PIN=0 turns it off. No effect elsewhere.
-enum class KokiriThreadRole : u32 { Back, Front, Vulkan };
+enum class KokiriThreadRole : u32 { Back, Front, Vulkan, Helper /* off the back's fastest cores */ };
 void PinCurrentThreadForRole(KokiriThreadRole role);
 void SetCurrentThreadToEfficiencyCores();
 void SetCurrentThreadToBackgroundWork();
