@@ -14,7 +14,7 @@
 
 **Kokiri** is a Nintendo Switch / Switch 2 emulator fork for **ARM64 handhelds with limited memory and older mobile GPUs**: Linux gaming handhelds and similar devices built on Snapdragon SoCs with Adreno GPUs (Mesa Turnip), with 12 GB of RAM or less.
 
-It builds on [Lichii for Android](https://github.com/pavelgajdo/Lichii-Android) by pavelgajdo, itself a fork of [Lichii](https://github.com/zortos293/Lichii) (Eglantine / Eden / yuzu lineage), and adds the changes those devices need. Like the Kokiri of the forest, it is meant for the small ones.
+It builds on [Hokkaido](https://github.com/pavelgajdo/Hokkaido) (formerly Lichii for Android) by pavelgajdo, itself a fork of [Lichii](https://github.com/zortos293/Lichii) (Eglantine / Eden / yuzu lineage), and adds the changes those devices need. Like the Kokiri of the forest, it is meant for the small ones.
 
 This is an independent, experimental fork. It is not affiliated with Nintendo or with the upstream projects it builds on. Games, keys and firmware are not included: only use games and system files you have legally obtained.
 
@@ -33,10 +33,15 @@ Other Adreno a6xx/a7xx devices running Linux with Turnip are the intended target
 
 ## What Kokiri changes
 
-On top of the latest Lichii for Android:
+On top of the latest Hokkaido (pavelgajdo), which already brings correct Ocarina of Time vegetation on GPUs without mesh shaders (task/mesh programs emulated through compute), and many Ocarina fixes:
 
 - **Wave64 software tensor math on Adreno a7xx.** Turnip on a7xx cannot run compute at the guest's 32-lane warp size; Kokiri requests 64-lane subgroups and lets one host wave carry two guest warps in the software HMMA emulation (matrix B broadcast per guest warp). On the Thor this took Ocarina of Time from ~1.5 fps to playable. Optional shared-B path: `EDEN_NX2_HMMA_SHARED_B=1`.
 - **Cheaper software matrix B gathers** on guarded Turnip pipelines (from NickWalters' Turnip work).
+- **GCC 13 fix:** `maxwell_3d.cpp` without loop unswitching (otherwise the split front ran macros from empty macro RAM).
+- **Split GPU threads pinned by core speed** on ARM devices with mixed cores: the back thread on the fastest cores, the front and the Vulkan worker off the slowest cluster (`EDEN_NX2_PIN=0` turns it off).
+- **Lighter back thread** (ports from Frizti's Fritchii PR 24): texture upload staging filled on a separate `TexFill` thread, no empty second submit after a fence, lock-free empty dirty-memory gathers, a `draw.begin` fast path.
+- **At most 4 shader pipeline build workers on aarch64** (`EDEN_NX2_PIPELINE_WORKERS` overrides): a cold shader cache with 7 workers filled the swap and froze a 12 GB device.
+- **Cold guest memory paged out to zram right away** on aarch64 Linux, as on Android.
 - **Memory savings for 12 GB devices on Linux aarch64** (previously Android-only upstream): 128 MiB NUP decompression cache, and render targets drawn below 1x keep only their scaled image (~0.9 GB saved in Ocarina of Time at 0.5x).
 
 Investigation notes from the Thor (what limits the frame rate, what was tried and measured) are kept in [docs/kokiri/NOTES.md](docs/kokiri/NOTES.md).
@@ -45,13 +50,14 @@ Investigation notes from the Thor (what limits the frame rate, what was tried an
 
 | Game | Status |
 |---|---|
-| The Legend of Zelda: Ocarina of Time (Switch 2) | Playable at 0.5x: about 17 fps average in Kokiri Forest gameplay (12–22 fps) with a warm shader cache. Movies and the intro run full speed. |
+| The Legend of Zelda: Ocarina of Time (Switch 2) | Playable at 0.5x with a warm shader cache and correct vegetation: about 14 fps walking around Kokiri Forest (10–27), about 9.6 fps in its heaviest fixed view. No crashes in our 10-minute runs. Movies and the intro run full speed. On the Thor the frame rate is set by a chain of waits (the game waits for the emulated GPU, which waits for the game); no single thread or the GPU is saturated. |
 
 ## Recommended settings (Ocarina of Time on Adreno)
 
-- **Graphics:** resolution 0.5x, GPU accuracy Low, asynchronous shader building on, disk shader cache on.
+- **Graphics:** resolution 0.5x, handheld mode, GPU accuracy Low, asynchronous shader building on, disk shader cache on, reactive flushing on.
+- **Upscaling:** FSR with 25% sharpening, emulator anti-aliasing None.
 - **Ocarina of Time anti-aliasing:** *No sharpening* (skips the game's tensor-core sharpening network), with the built-in *Max Resolution* patch enabled.
-- **Environment** (launch script): `EDEN_NX2_HMMA_SHARED_B=1`, `EDEN_NX2_ASTC_MAX_DIM=1024`, and on 12 GB devices `EDEN_NX2_VRAM_LIMIT_MIB=3200`.
+- **Environment** (launch script): `EDEN_NX2_HMMA_SHARED_B=1` and `EDEN_NX2_ASTC_MAX_DIM=1024`. Do not set `EDEN_NX2_VRAM_LIMIT_MIB` on this base: it budgets device memory itself and a tight limit made image allocations fail.
 - Keep the shader cache between sessions: the first visit to an area compiles pipelines and stutters; after that the area runs at its normal frame rate.
 
 ## Building (Linux aarch64)
@@ -82,4 +88,4 @@ See [LICENSE.txt](LICENSE.txt) and the source files for the applicable license t
 
 ### Resumo em português
 
-Kokiri é um fork do emulador de Switch / Switch 2 para portáteis ARM64 com pouca memória e GPUs Adreno mais antigas (Linux + Mesa Turnip). Testado em um AYN Thor Pro 256 GB + 12 GB (Snapdragon 8 Gen 2, Adreno 740). Traz HMMA por software em wave64 para Adreno a7xx, economia de memória para aparelhos de 12 GB e notas de investigação de desempenho. Ocarina of Time (Switch 2) é jogável a 0.5x, cerca de 17 fps de média em Kokiri com o cache de shaders já compilado.
+Kokiri é um fork do emulador de Switch / Switch 2 para portáteis ARM64 com pouca memória e GPUs Adreno mais antigas (Linux + Mesa Turnip). Testado em um AYN Thor Pro 256 GB + 12 GB (Snapdragon 8 Gen 2, Adreno 740). Traz HMMA por software em wave64 para Adreno a7xx, economia de memória para aparelhos de 12 GB e notas de investigação de desempenho. Ocarina of Time (Switch 2) é jogável a 0.5x, com a vegetação correta: cerca de 14 fps andando em Kokiri e 9,6 na vista mais pesada, sem travamentos nos nossos testes.
