@@ -987,6 +987,7 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
     });
     chunk->MarkSubmit();
     DispatchWork();
+    recorded_since_submit = false;
     return signal_value;
 }
 
