@@ -2626,6 +2626,18 @@ void RasterizerVulkan::FlushCommands() {
     }
     draw_counter = 0;
     pending_native_work = false;
+    // Nothing was recorded since the last submission (the fence that called this just submitted
+    // everything: SignalFence flushes again right after InnerFence::Queue). A second, empty
+    // submission only cost the back a new command buffer and the re-emission of all its state
+    // at the next draw. Port of Fritchii 40355a3 (on by default here; EDEN_NX2_SKIP_EMPTY_SUBMITS=0
+    // turns it off).
+    static const bool skip_empty = [] {
+        const char* const value = std::getenv("EDEN_NX2_SKIP_EMPTY_SUBMITS");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (skip_empty && !scheduler.RecordedSinceSubmit()) {
+        return;
+    }
     // Fences with downloads or queries come here right after queueing: ~9,400 a second in
     // Hyrule Warriors: Age of Imprisonment fights. Batched like the fences themselves.
     if (!scheduler.DeferFlush()) {

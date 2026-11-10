@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <bit>
 #include <functional>
 #include <mutex>
@@ -68,6 +69,17 @@ public:
     }
 
     void Gather(std::function<void(PAddr, size_t)>& callback) {
+        // Nothing collected since the last gather: nothing to hand out, without the two locks
+        // (every fence gathers, ~16,000 a second in Ocarina of Time). Collect only adds to
+        // back_buffer while `current` holds a valid page and leaves a valid one there; only a
+        // gather resets it. Port of Fritchii 40355a3 (EDEN_NX2_DIRTY_FAST=0 turns it off).
+        static const bool fast_empty = [] {
+            const char* const value = std::getenv("EDEN_NX2_DIRTY_FAST");
+            return value == nullptr || value[0] != '0';
+        }();
+        if (fast_empty && !IsValid(current.load(std::memory_order_acquire).address)) {
+            return;
+        }
         // FlushRegion also gathers off the GPU thread (host1x video decode reads); serialize
         // gatherers so one cannot swap or clear front_buffer while another iterates it.
         std::scoped_lock gather_lk(gather_guard);

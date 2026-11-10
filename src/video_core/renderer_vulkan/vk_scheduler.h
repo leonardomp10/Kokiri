@@ -184,6 +184,11 @@ public:
         query_cache = &query_cache_;
     }
 
+    /// Whether anything was recorded since the last submission (skip empty submissions).
+    [[nodiscard]] bool RecordedSinceSubmit() const noexcept {
+        return recorded_since_submit;
+    }
+
     // Registers a callback to perform on queue submission.
     void RegisterOnSubmit(std::function<void()>&& func) {
         on_submit = std::move(func);
@@ -196,6 +201,7 @@ public:
         if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
             VideoCommon::GpuSplit::CheckOwner("Scheduler::Record");
         }
+        recorded_since_submit = true;
         if (chunk->Record(command)) {
             return;
         }
@@ -326,6 +332,8 @@ public:
 private:
     std::chrono::steady_clock::time_point last_flush{};
     bool flush_pending{};
+    /// Set by every Record, cleared once SubmitExecution handed the commands to the worker.
+    bool recorded_since_submit{true};
 
     class Command {
     public:
