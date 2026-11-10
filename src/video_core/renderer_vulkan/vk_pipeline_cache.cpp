@@ -434,7 +434,20 @@ size_t GetTotalPipelineWorkers() {
     }
     return std::min(max_core_threads, desired);
 #else
+    // Kokiri: each pipeline build holds a compiler's memory; on 12 GB ARM handhelds seven at once
+    // (a cold shader cache) filled the swap and froze the AYN Thor. Four by default on aarch64,
+    // EDEN_NX2_PIPELINE_WORKERS=<n> overrides.
+    if (const char* value = std::getenv("EDEN_NX2_PIPELINE_WORKERS")) {
+        const long workers = std::strtol(value, nullptr, 10);
+        if (workers > 0) {
+            return std::min(max_core_threads, static_cast<size_t>(workers));
+        }
+    }
+#if defined(__aarch64__)
+    return std::min<size_t>(max_core_threads, 4);
+#else
     return max_core_threads;
+#endif
 #endif
 }
 
