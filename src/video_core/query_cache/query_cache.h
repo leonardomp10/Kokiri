@@ -293,11 +293,13 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
     // A fence-flagged payload release writes a constant, so at low accuracy with Default fences
     // it stays synchronized as before #337: its fence may be skipped and the query freed at once.
     // Only reports of GPU counters wait for their fence to run.
+    // A release over a report still pending waits too, so the older report can't land after it.
     const bool is_synced = is_fence && counter_type == QueryType::Payload &&
                            (Settings::IsGPUFenceBehaviorDefault()
                                 ? !Settings::IsGPULevelHigh()
                                 : !Settings::IsGPUFenceBehaviorBalanced() &&
-                                      !Settings::IsGPUFenceBehaviorAccurate());
+                                      !Settings::IsGPUFenceBehaviorAccurate()) &&
+                           !HoldsQueries(cpu_addr, has_timestamp ? 16 : 4);
     std::function<void()> operation([this, is_synced, streamer, query_base = query,
                                      query_location, pointer, pointer_timestamp, cpu_addr, addr,
                                      asid = gpu_memory->GetID(), counter_type, delayed_release,
