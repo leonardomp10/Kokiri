@@ -214,6 +214,8 @@ private:
     EmissionBudget emission_budget;
 
     GraphicsPipelineCacheKey graphics_key{};
+    /// The last Create*Pipeline found its native program changed under the read (retry later).
+    bool retry_pipeline{};
     GraphicsPipeline* current_pipeline{};
 
     /// Destroys graphics pipelines unused for a while, once the GPU is done with them.

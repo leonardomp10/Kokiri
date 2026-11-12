@@ -972,6 +972,11 @@ ComputePipeline* PipelineCache::CurrentComputePipeline(u64& native_key) {
     auto& entry{pair->second};
     if (is_new) {
         entry = CreateComputePipeline(key, shader);
+        if (!entry.pipeline && std::exchange(retry_pipeline, false)) {
+            // Not a failed build: the program changed under the read. Look it up again later.
+            compute_cache.erase(pair);
+            return nullptr;
+        }
     } else if (!entry.null_pointer_slots.empty() && entry.rebuilds < MaxComputeRebuilds &&
                StaleNullPointerSlot(entry)) {
         // The translation dropped accesses through a pointer that was null back then. Which slots
@@ -1672,6 +1677,11 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
         if (!pipeline) {
             pipeline = CreateGraphicsPipeline();
         }
+        if (!pipeline && std::exchange(retry_pipeline, false)) {
+            // Not a failed build: the program changed under the read. Look it up again later.
+            graphics_cache.erase(pair);
+            return nullptr;
+        }
     }
     if (!pipeline) {
         return nullptr;
@@ -2300,7 +2310,21 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline() {
         ReportRuntimePipeline("Graphics", begin, shaders);
     };
     GraphicsEnvironments environments;
-    GetGraphicsEnvironments(environments, graphics_key.unique_hashes);
+    try {
+        GetGraphicsEnvironments(environments, graphics_key.unique_hashes);
+    } catch (const Shader::Exception& exception) {
+        // The game rewrote a native program while its environment was read (SetCachedSize:
+        // "Native shader changed while constructing pipeline"). Uncaught on the GPU thread it
+        // aborted Ocarina of Time on the Thor ~150-210 s after boot (title and file menus); the
+        // draw is skipped and the pipeline is looked up again on the next one.
+        static std::atomic<u32> logged{};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+            LOG_WARNING(Render_Vulkan, "Graphics pipeline {:016x} not built: {}",
+                        graphics_key.Hash(), exception.what());
+        }
+        retry_pipeline = true;
+        return nullptr;
+    }
 
     std::shared_ptr<ShaderPools> emit_pools;
     auto reservation = emission_budget.TryAcquire(maxwell3d->GetNativeMacroEngine().native_turing);
@@ -2360,7 +2384,18 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(const ComputePipe
     const auto& qmd{kepler_compute->launch_description};
     ComputeEnvironment env{*kepler_compute, *gpu_memory, program_base, qmd.program_start,
                            shader->lowered_native};
-    env.SetCachedSize(shader->size_bytes);
+    try {
+        env.SetCachedSize(shader->size_bytes);
+    } catch (const Shader::Exception& exception) {
+        // As for graphics: the native program changed under the read; skip, look up again later.
+        static std::atomic<u32> logged{};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+            LOG_WARNING(Render_Vulkan, "Compute pipeline {:016x} not built: {}", key.Hash(),
+                        exception.what());
+        }
+        retry_pipeline = true;
+        return {};
+    }
     env.KeepStoragePointers(keep_pointers);
 
     main_pools.ReleaseContents();
