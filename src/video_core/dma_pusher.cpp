@@ -115,10 +115,20 @@ bool DmaPusher::Step() {
     // are written and the memory not yet reused: copy them here. EDEN_NX2_RESNAPSHOT=0: off.
     if (ResnapshotEnabled() && suspensions.load(std::memory_order_relaxed) != suspensions_before) {
         const u64 now = suspensions.load(std::memory_order_acquire);
+        // Not the entries the front list already ran, nor the one it suspended in: their copy is
+        // what the parser consumed, and the entry resumes against it (n76_k6 / n78_f1: the
+        // in-progress entry, refreshed from a ring the game had refilled, resumed at an offset
+        // inside another frame's words). Step's resume check decides from that copy whether the
+        // rest of the entry comes from memory or from the copy.
+        bool front = true;
         for (CommandList& list : dma_pushbuffer) {
             if (!list.submitted_offsets.empty()) {
-                RefreshSnapshot(list, now);
+                const size_t first = front ? dma_pushbuffer_subindex +
+                                                 (command_resume_offset != 0 ? 1 : 0)
+                                           : 0;
+                RefreshSnapshot(list, now, first);
             }
+            front = false;
         }
     }
 
@@ -681,9 +691,9 @@ void DmaPusher::NoteDmaSemaphore(u32 method, u32 argument) {
     }
 }
 
-void DmaPusher::RefreshSnapshot(CommandList& list, u64 now) {
+void DmaPusher::RefreshSnapshot(CommandList& list, u64 now, size_t first) {
     list.snapshot_suspensions = now;
-    for (size_t i = 0; i < list.command_lists.size() && i < list.submitted_offsets.size(); ++i) {
+    for (size_t i = first; i < list.command_lists.size() && i < list.submitted_offsets.size(); ++i) {
         const CommandListHeader& entry = list.command_lists[i];
         const u32 offset = list.submitted_offsets[i];
         if (offset + entry.size > list.submitted_words.size()) {

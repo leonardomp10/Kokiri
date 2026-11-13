@@ -220,7 +220,7 @@ public:
     /// the front what it writes (GpuSplit::NoteSemaphoreWrite).
     void NoteDmaSemaphore(u32 method, u32 argument);
     /// Copies the list's words from memory again, as of suspension count `now`.
-    void RefreshSnapshot(CommandList& list, u64 now);
+    void RefreshSnapshot(CommandList& list, u64 now, size_t first = 0);
     /// Copies the list's deferred entries (CommandList::deferred_entries) from memory.
     void RefreshDeferredEntries(CommandList& list);
 
