@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -501,6 +502,19 @@ bool DriverCachesPipelines(const Device& device) {
 }
 } // Anonymous namespace
 
+namespace {
+// EDEN_NX2_PREBUILD_COUNT / EDEN_NX2_PREBUILD_MB: how many cached graphics pipelines skipped at
+// boot the background prebuild admits, and their captured environments' bytes (64 / 16 MiB by
+// default). Ocarina of Time skips ~1,500 and admits 64; the rest translate on the GPU thread at
+// first draw (the stalls left after HINT_COLD).
+size_t EnvSize(const char* name, size_t fallback) {
+    if (const char* value = std::getenv(name); value != nullptr && value[0] != '\0') {
+        return static_cast<size_t>(std::strtoull(value, nullptr, 10));
+    }
+    return fallback;
+}
+} // namespace
+
 PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
                              const Device& device_, Scheduler& scheduler_,
                              DescriptorPool& descriptor_pool_,
@@ -520,7 +534,9 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
       emission_budget{num_pipeline_workers},
       workers(num_pipeline_workers, "VkPipelineBuilder", {}, Common::ThreadPlacement::Background),
       serialization_thread(1, "VkPipelineSerialization", {}, Common::ThreadPlacement::Background),
-      background_pipelines{64, 16 * 1024 * 1024, device.HasBrokenParallelShaderCompiling()} {
+      background_pipelines{EnvSize("EDEN_NX2_PREBUILD_COUNT", 64),
+                           EnvSize("EDEN_NX2_PREBUILD_MB", 16) * 1024 * 1024,
+                           device.HasBrokenParallelShaderCompiling()} {
     const auto& float_control{device.FloatControlProperties()};
     const VkDriverId driver_id{device.GetDriverID()};
     const VkShaderStageFlags subgroup_stages{device.GetSubgroupSupportedStages()};
