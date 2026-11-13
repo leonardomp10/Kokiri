@@ -238,7 +238,53 @@ bool DmaPusher::Step() {
             gpu_written,
             use_safe && memory_manager.IsMemoryDirty(dma_state.dma_get,
                                                      header.size * sizeof(u32)));
-        if (submitted) {
+        // A resumed entry reads memory again, but the game runs frames ahead and refills its
+        // command memory: Ocarina of Time's channel 2 resumed into the next frame's words, skipped
+        // ~23 QMD launches (0x...8200-0xbf00 never signaled) and then waited forever on the
+        // counter they increment (n76_k6). The part already executed tells which: if memory no
+        // longer holds the words the copy made at submit holds for it, the memory is another
+        // frame's and the rest of the entry comes from the copy. EDEN_NX2_RESUME_STALE=0: off.
+        bool resume_from_copy = false;
+        if (static const bool stale_guard = [] {
+                const char* value = std::getenv("EDEN_NX2_RESUME_STALE");
+                return value == nullptr || value[0] != '0';
+            }();
+            stale_guard && !submitted && command_resume_offset != 0 && !gpu_written &&
+            dma_pushbuffer_subindex < command_list.submitted_offsets.size() &&
+            !std::ranges::binary_search(command_list.deferred_entries,
+                                        static_cast<u32>(dma_pushbuffer_subindex))) {
+            const u32 offset = command_list.submitted_offsets[dma_pushbuffer_subindex];
+            const size_t done = std::min<size_t>(command_resume_offset, header.size);
+            if (offset + header.size <= command_list.submitted_words.size() && done != 0) {
+                std::vector<u32> live(done);
+                memory_manager.ReadBlockUnsafe(dma_state.dma_get, live.data(), done * sizeof(u32));
+                size_t differ = 0;
+                for (size_t i = 0; i < done; ++i) {
+                    differ += live[i] != command_list.submitted_words[offset + i].argument ? 1 : 0;
+                }
+                if (differ != 0) {
+                    resume_from_copy = true;
+                    static std::atomic<u32> logged{};
+                    if (const u32 n = ++logged; n <= 16 || (n & (n - 1)) == 0) {
+                        LOG_WARNING(HW_GPU,
+                                    "Resume on ch {}: entry {:#x}+{:#x} was refilled while suspended "
+                                    "({} of the {} words already run differ); resuming from the "
+                                    "submit copy (#{})",
+                                    channel_state.bind_id, u64{header.addr}, u64{header.size},
+                                    differ, done, n);
+                    }
+                }
+            }
+        }
+        if (resume_from_copy) {
+            const std::span<const CommandHeader> commands{
+                command_list.submitted_words.data() +
+                    command_list.submitted_offsets[dma_pushbuffer_subindex],
+                header.size};
+            RecordParsedEntry(header, commands);
+            command_resume_offset +=
+                ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
+        } else if (submitted) {
             const std::span<const CommandHeader> commands{
                 command_list.submitted_words.data() +
                     command_list.submitted_offsets[dma_pushbuffer_subindex],
