@@ -225,8 +225,21 @@ public:
     void RefreshDeferredEntries(CommandList& list);
 
     /// EDEN_NX2_RESNAPSHOT=0 turns snapshot refreshes off.
+    /// EDEN_NX2_COPY_ALWAYS=1: run every entry from the copy made at submit (resumed ones too)
+    /// and never copy again from memory, as the hardware ran what was submitted. Ocarina of Time
+    /// refills its command memory frames ahead; a later copy or a resumed read gets another frame.
+    static bool CopyAlways() {
+        static const bool enabled = [] {
+            const char* value = std::getenv("EDEN_NX2_COPY_ALWAYS");
+            return value != nullptr && value[0] == '1';
+        }();
+        return enabled;
+    }
     static bool ResnapshotEnabled() {
         static const bool enabled = [] {
+            if (CopyAlways()) {
+                return false;
+            }
             const char* value = std::getenv("EDEN_NX2_RESNAPSHOT");
             return value == nullptr || value[0] != '0';
         }();

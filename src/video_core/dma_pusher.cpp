@@ -286,7 +286,23 @@ bool DmaPusher::Step() {
                 }
             }
         }
-        if (resume_from_copy) {
+        const bool copy_always =
+            CopyAlways() && !gpu_written &&
+            dma_pushbuffer_subindex < command_list.submitted_offsets.size() &&
+            !std::ranges::binary_search(command_list.deferred_entries,
+                                        static_cast<u32>(dma_pushbuffer_subindex)) &&
+            command_list.submitted_offsets[dma_pushbuffer_subindex] + header.size <=
+                command_list.submitted_words.size();
+        if (copy_always) {
+            const std::span<const CommandHeader> commands{
+                command_list.submitted_words.data() +
+                    command_list.submitted_offsets[dma_pushbuffer_subindex],
+                header.size};
+            RecordParsedEntry(header, commands);
+            step_path = 'A';
+            command_resume_offset +=
+                ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
+        } else if (resume_from_copy) {
             const std::span<const CommandHeader> commands{
                 command_list.submitted_words.data() +
                     command_list.submitted_offsets[dma_pushbuffer_subindex],
