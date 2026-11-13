@@ -20,7 +20,9 @@
 
 #include "core/hle/kernel/k_process.h"
 
+#include <dlfcn.h>
 #include <signal.h>
+#include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -30,6 +32,105 @@ namespace {
 
 struct sigaction g_orig_bus_action;
 struct sigaction g_orig_segv_action;
+
+// A host fault that NCE does not own is passed to the handler that was installed before ours.
+// When that handler is SIG_DFL (the usual case), calling sa_sigaction jumps to address 0 and the
+// core dump only shows pc=0 inside the signal trampoline, losing the real fault. Instead, print the
+// faulting context (async-signal-safe writes; dladdr is best effort, the process is dying anyway),
+// restore the default action and return, so the instruction faults again and the kernel dumps the
+// real pc.
+void FaultWrite(const char* s) {
+    size_t n = 0;
+    while (s[n] != '\0') {
+        ++n;
+    }
+    [[maybe_unused]] auto r = write(STDERR_FILENO, s, n);
+}
+
+void FaultWriteHex(const char* label, u64 v) {
+    char buf[40];
+    size_t i = 0;
+    while (label[i] != '\0' && i < 16) {
+        buf[i] = label[i];
+        ++i;
+    }
+    buf[i++] = '0';
+    buf[i++] = 'x';
+    for (int sh = 60; sh >= 0; sh -= 4) {
+        buf[i++] = "0123456789abcdef"[(v >> sh) & 0xf];
+    }
+    buf[i++] = ' ';
+    buf[i] = '\0';
+    FaultWrite(buf);
+}
+
+void FaultWriteWhere(const char* label, u64 addr) {
+    FaultWriteHex(label, addr);
+    Dl_info dl{};
+    if (addr != 0 && dladdr(reinterpret_cast<void*>(addr), &dl) != 0 && dl.dli_fname != nullptr) {
+        FaultWrite("(");
+        FaultWrite(dl.dli_fname);
+        FaultWriteHex("+", addr - reinterpret_cast<u64>(dl.dli_fbase));
+        if (dl.dli_sname != nullptr) {
+            FaultWrite(dl.dli_sname);
+        }
+        FaultWrite(")");
+    } else {
+        FaultWrite("(anon)");
+    }
+    FaultWrite("\n");
+}
+
+void ChainHostFault(const struct sigaction& orig, int sig, void* raw_info, void* raw_context) {
+    if ((orig.sa_flags & SA_SIGINFO) != 0 && orig.sa_sigaction != nullptr) {
+        return orig.sa_sigaction(sig, static_cast<siginfo_t*>(raw_info), raw_context);
+    }
+    if ((orig.sa_flags & SA_SIGINFO) == 0 && orig.sa_handler != SIG_DFL &&
+        orig.sa_handler != SIG_IGN && orig.sa_handler != nullptr) {
+        return orig.sa_handler(sig);
+    }
+    auto* info = static_cast<siginfo_t*>(raw_info);
+    auto& mctx = static_cast<ucontext_t*>(raw_context)->uc_mcontext;
+    char name[17]{};
+    prctl(PR_GET_NAME, name, 0, 0, 0);
+    FaultWrite("\n=== NX2 host fault nao tratado: sinal ");
+    FaultWrite(sig == SIGSEGV ? "SIGSEGV" : (sig == SIGBUS ? "SIGBUS" : "?"));
+    FaultWrite(" thread '");
+    FaultWrite(name);
+    FaultWrite("' ");
+    FaultWriteHex("tid=", static_cast<u64>(syscall(SYS_gettid)));
+    FaultWriteHex("code=", static_cast<u64>(info->si_code));
+    FaultWriteHex("addr=", reinterpret_cast<u64>(info->si_addr));
+    FaultWrite("\n");
+    FaultWriteWhere("pc=", mctx.pc);
+    FaultWriteWhere("lr=", mctx.regs[30]);
+    for (int r = 0; r < 31; ++r) {
+        char lbl[6] = {'x', static_cast<char>('0' + r / 10), static_cast<char>('0' + r % 10), '=',
+                       '\0', '\0'};
+        FaultWriteHex(lbl, mctx.regs[r]);
+        if (r % 4 == 3) {
+            FaultWrite("\n");
+        }
+    }
+    FaultWriteHex("sp=", mctx.sp);
+    FaultWrite("\n");
+    // Frame-pointer walk; stops at the first pointer outside a sane stack window.
+    u64 fp = mctx.regs[29];
+    for (int depth = 0; depth < 24; ++depth) {
+        if (fp == 0 || (fp & 0xf) != 0 || fp < mctx.sp || fp - mctx.sp > (64ULL << 20)) {
+            break;
+        }
+        const u64* frame = reinterpret_cast<const u64*>(fp);
+        FaultWriteWhere("  #", frame[1]);
+        fp = frame[0];
+    }
+    FaultWrite("=== fim\n");
+    // Back to the default action; returning re-executes the faulting instruction.
+    struct sigaction dfl {};
+    dfl.sa_handler = SIG_DFL;
+    sigemptyset(&dfl.sa_mask);
+    sigaction(sig, &dfl, nullptr);
+}
 
 // Verify assembly offsets.
 using NativeExecutionParameters = Kernel::KThread::NativeExecutionParameters;
@@ -268,11 +369,11 @@ bool ArmNce::HandleGuestAccessFault(GuestContext* guest_ctx, void* raw_info, voi
 }
 
 void ArmNce::HandleHostAlignmentFault(int sig, void* raw_info, void* raw_context) {
-    return g_orig_bus_action.sa_sigaction(sig, static_cast<siginfo_t*>(raw_info), raw_context);
+    ChainHostFault(g_orig_bus_action, sig, raw_info, raw_context);
 }
 
 void ArmNce::HandleHostAccessFault(int sig, void* raw_info, void* raw_context) {
-    return g_orig_segv_action.sa_sigaction(sig, static_cast<siginfo_t*>(raw_info), raw_context);
+    ChainHostFault(g_orig_segv_action, sig, raw_info, raw_context);
 }
 
 void ArmNce::LockThread(Kernel::KThread* thread) {
