@@ -58,6 +58,10 @@
 #include <mutex>
 #include <random>
 #include <utility>
+#include <condition_variable>
+#include <deque>
+#include <string_view>
+#include <thread>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -1067,6 +1071,52 @@ void HostMemory::HintCold(size_t physical_offset, size_t length,
         // Android swaps to zram only, and its low-memory killer acts on resident memory: page
         // out right away instead of waiting for reclaim. ARM Linux handhelds (AYN Thor) are the
         // same: 12 GB of RAM, zram swap, and reclaim under pressure stalls the whole system.
+        // Kokiri, EDEN_NX2_HINT_COLD: the caches hint every upload range at once every 600
+        // frames, and paging them out inline stalled the GPU thread 1-2.3 s each time on the Thor
+        // (Ocarina walks: the biggest hitches, right after every 600th present). "async" pages
+        // them out on a worker thread, "cold" only deactivates them (MADV_COLD), "off" skips the
+        // hint; unset keeps the inline page-out.
+        static const int mode = [] {
+            const char* const value = std::getenv("EDEN_NX2_HINT_COLD");
+            if (value == nullptr) {
+                return 0;
+            }
+            const std::string_view text{value};
+            return text == "async" ? 1 : text == "cold" ? 2 : text == "off" ? 3 : 0;
+        }();
+        if (mode == 3) {
+            return;
+        }
+        if (mode == 2) {
+            madvise(address, length, MADV_COLD);
+            return;
+        }
+        if (mode == 1) {
+            static std::mutex queue_mutex;
+            static std::condition_variable queue_cv;
+            static std::deque<std::pair<u8*, size_t>> queue;
+            static std::once_flag started;
+            std::call_once(started, [] {
+                std::thread([] {
+                    for (;;) {
+                        std::pair<u8*, size_t> range;
+                        {
+                            std::unique_lock lock{queue_mutex};
+                            queue_cv.wait(lock, [] { return !queue.empty(); });
+                            range = queue.front();
+                            queue.pop_front();
+                        }
+                        madvise(range.first, range.second, MADV_PAGEOUT);
+                    }
+                }).detach();
+            });
+            {
+                std::scoped_lock lock{queue_mutex};
+                queue.emplace_back(address, length);
+            }
+            queue_cv.notify_one();
+            return;
+        }
         madvise(address, length, MADV_PAGEOUT);
 #elif defined(__linux__) && defined(MADV_COLD)
         // MADV_COLD only deactivates the pages, like VirtualUnlock. MADV_PAGEOUT writes them to
