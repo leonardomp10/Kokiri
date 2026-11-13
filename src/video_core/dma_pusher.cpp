@@ -299,7 +299,6 @@ bool DmaPusher::Step() {
                     command_list.submitted_offsets[dma_pushbuffer_subindex],
                 header.size};
             RecordParsedEntry(header, commands);
-            step_path = 'A';
             command_resume_offset +=
                 ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
         } else if (resume_from_copy) {
